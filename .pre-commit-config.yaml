@@ -16,6 +16,12 @@ repos:
       - id: check-merge-conflict
       - id: detect-private-key
 
+  # Secret scanning: blocks commits containing API keys, tokens, credentials, etc.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
   # Python: Ruff lint (with auto-fix) and format (matches CI: core/ plugins/ server/ tests/)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.1
