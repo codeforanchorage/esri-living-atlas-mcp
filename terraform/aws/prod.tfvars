@@ -1,4 +1,4 @@
-lambda_name     = "anchorage-gis-mcp-prod"
+lambda_name     = "worcester-gis-mcp-prod"
 stage_name      = "prod"
 aws_region      = "us-west-2"
 config_file     = "config.yaml"
@@ -10,7 +10,7 @@ lambda_timeout  = 120
 api_quota_limit = 3000
 api_rate_limit  = 5
 api_burst_limit = 10
-custom_domain   = "anchorage-gis.codeforanchorage.org"
+custom_domain   = "worcester-gis.codeforanchorage.org"
 
 # Cap concurrent Lambda executions. Cost and blast-radius protection if
 # WAF is bypassed via distributed sources. Conversational MCP traffic does

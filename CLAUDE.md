@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Worcester fork.** This is a Worcester, MA fork of the OpenContext MCP server framework. It is configured to serve the City of Worcester's open data portal (`opendata.worcesterma.gov`), an ArcGIS Hub site, via the built-in `arcgis` plugin (see `config.yaml`).
+
 ## Build & Development Commands
 
 ```bash

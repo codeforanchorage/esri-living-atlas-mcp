@@ -10,6 +10,10 @@
 
 ---
 
+**Worcester GIS MCP** — a Worcester, MA fork of OpenContext. It serves the City of Worcester's open data portal ([opendata.worcesterma.gov](https://opendata.worcesterma.gov)), an ArcGIS Hub site, through the built-in `arcgis` plugin.
+
+---
+
 ## Quick Start
 
 ```bash
@@ -75,3 +79,5 @@ Hooks: Ruff, yamllint, gofmt. Run manually: `pre-commit run --all-files`.
 MIT — see [LICENSE](LICENSE).
 
 **Author:** Srihari Raman, City of Boston Department of Innovation and Technology
+
+**Worcester fork** maintained for the City of Worcester, MA. OpenContext is MIT-licensed; this fork retains the original attribution above.
