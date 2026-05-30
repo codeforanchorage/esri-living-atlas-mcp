@@ -41,7 +41,10 @@ curl -sS -X POST https://worcester-gis.codeforanchorage.org/mcp \
 | ---- | ------- |
 | `arcgis__search_datasets` | Discover datasets by keyword (e.g. "parcels", "zoning"). Supports a `type` filter — see below. |
 | `arcgis__get_dataset` | Fetch a dataset's metadata and service URL |
+| `arcgis__get_layer_schema` | List a dataset's fields (name, type, alias, coded values), optionally filtered by `keyword` |
+| `arcgis__get_distinct_values` | List the distinct values in a field (with optional `like` / `where`) to confirm exact codes |
 | `arcgis__query_data` | Query features from a dataset (supports `where`, `out_fields`, `limit`) |
+| `arcgis__spatial_query_point` | Point-in-polygon: which polygon(s) contain a given `lon`/`lat` |
 | `arcgis__get_aggregations` | Facet counts across the catalog (e.g. by `type`, `tags`, `categories`) |
 
 ### Cutting through the catalog noise: `type` filter
@@ -97,6 +100,33 @@ Returned current City records, e.g.:
 
 This confirms TLS + custom domain → API Gateway → Lambda → the `arcgis` plugin, including the layer-index resolution, the `type` filter, and `where`/`out_fields` filtering all working against live data.
 
+### Writing correct queries: schema → distinct values → query
+
+ArcGIS field names are **case-sensitive**, and codes have exact spellings. Rather than guess (or query blind to discover fields), use the discovery tools first:
+
+1. **`get_layer_schema`** — see the real field names and types. `keyword` narrows a wide schema:
+   ```jsonc
+   { "item_id": "<id>", "keyword": "date" }   // -> Date_Submitted, Permit_License_Issued_Date, ...
+   ```
+2. **`get_distinct_values`** — confirm the exact value to filter on (catches `Residential` vs `1 or 2 Family Dwelling`):
+   ```jsonc
+   { "item_id": "<id>", "field": "Record_Status" }        // -> Active, Complete
+   { "item_id": "<id>", "field": "Permit_For", "like": "ADU" }  // -> Accessory Dwelling Unit (ADU)
+   ```
+3. **`query_data`** — now write the `where` clause with verified names and values.
+
+### Spatial lookup: `spatial_query_point`
+
+"Which polygon contains this location?" — pass a WGS84 `lon`/`lat` (longitude first) and a polygon Feature Service (parcels, wards, council districts, flood zones, …):
+
+```jsonc
+// arcgis__spatial_query_point
+{ "item_id": "<parcel-polygons-id>", "lon": -71.802, "lat": 42.262,
+  "out_fields": "MAP_PAR_ID,POLY_TYPE", "limit": 3 }
+```
+
+Returns the attributes of every polygon containing the point (no geometry). Confirm a layer is polygon-based with `get_layer_schema` first.
+
 ---
 
 ## Run locally
@@ -108,7 +138,7 @@ pip install aiohttp pyyaml
 python3 scripts/local_server.py      # serves http://localhost:8000/mcp
 ```
 
-On startup it connects to the live portal and registers the four `arcgis__*` tools. Worcester's portal is public, so **no API token is required**. (On a Windows console you may need `PYTHONUTF8=1` for the startup banner's emoji.)
+On startup it connects to the live portal and registers the seven `arcgis__*` tools. Worcester's portal is public, so **no API token is required**. (On a Windows console you may need `PYTHONUTF8=1` for the startup banner's emoji.)
 
 See [Getting Started](docs/GETTING_STARTED.md) for the generic OpenContext setup.
 
