@@ -358,7 +358,7 @@ class ArcGISPlugin(DataPlugin):
         where_clause = WhereValidator.validate(where_clause)
         out_fields = filters.get("out_fields", "*") if filters else "*"
 
-        service_url = self._ensure_layer_url(service_url)
+        service_url = await self._ensure_layer_url(service_url)
         query_url = f"{service_url}/query"
         record_count = min(limit, 1000)
         params = {
@@ -454,15 +454,38 @@ class ArcGISPlugin(DataPlugin):
 
     # ── Private helpers ─────────────────────────────────────────────────
 
-    @staticmethod
-    def _ensure_layer_url(service_url: str) -> str:
-        """Append /0 if the URL points at a FeatureServer or MapServer root
-        without a layer index (e.g. .../FeatureServer -> .../FeatureServer/0).
+    async def _ensure_layer_url(self, service_url: str) -> str:
+        """Resolve a Feature/Map Server URL to a specific queryable layer URL.
+
+        If the URL already targets a layer (e.g. ``.../FeatureServer/3``) it is
+        returned unchanged. If it points at the service root
+        (e.g. ``.../FeatureServer``) the service metadata is fetched and the
+        first published layer's id is used. Layers are not guaranteed to start
+        at index 0 -- services derived from the MassGIS parcel standard, for
+        instance, publish their only layer at index 1 -- so assuming ``/0``
+        silently breaks queries against them. Falls back to ``/0`` if the
+        service metadata cannot be read.
         """
         stripped = service_url.rstrip("/")
-        if re.search(r"/(FeatureServer|MapServer)$", stripped, re.IGNORECASE):
-            return f"{stripped}/0"
-        return stripped
+        if not re.search(r"/(FeatureServer|MapServer)$", stripped, re.IGNORECASE):
+            # Already targets a specific layer, or isn't a recognized service root.
+            return stripped
+
+        layer_id: Any = 0
+        try:
+            response = await self.feature_client.get(stripped, params={"f": "json"})
+            response.raise_for_status()
+            meta = response.json()
+            candidates = meta.get("layers") or meta.get("tables") or []
+            first_id = candidates[0].get("id") if candidates else None
+            if first_id is not None:
+                layer_id = first_id
+        except Exception as e:
+            logger.warning(
+                f"Could not read service metadata for {stripped}; "
+                f"defaulting to layer 0: {e}"
+            )
+        return f"{stripped}/{layer_id}"
 
     @staticmethod
     def _epoch_ms_to_iso(epoch_ms: Any) -> str:

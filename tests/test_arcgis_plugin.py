@@ -265,29 +265,125 @@ class TestQueryDataTwoHop:
 
 
 class TestEnsureLayerUrl:
-    def test_appends_layer_to_feature_server_root(self):
-        result = ArcGISPlugin._ensure_layer_url(
+    @staticmethod
+    def _plugin_with_meta(arcgis_config, meta):
+        """Plugin whose feature_client returns the given service metadata."""
+        plugin = ArcGISPlugin(arcgis_config)
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json.return_value = meta
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        plugin.feature_client = mock_client
+        return plugin
+
+    @pytest.mark.asyncio
+    async def test_resolves_first_layer_id_from_metadata(self, arcgis_config):
+        # Service publishes its only layer at a non-zero index (MassGIS-style).
+        plugin = self._plugin_with_meta(
+            arcgis_config, {"layers": [{"id": 1, "name": "Parcel Polygons"}]}
+        )
+        result = await plugin._ensure_layer_url(
+            "https://services.arcgis.com/xyz/FeatureServer"
+        )
+        assert result == "https://services.arcgis.com/xyz/FeatureServer/1"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_tables_when_no_layers(self, arcgis_config):
+        plugin = self._plugin_with_meta(
+            arcgis_config,
+            {"layers": [], "tables": [{"id": 2, "name": "Assessing"}]},
+        )
+        result = await plugin._ensure_layer_url(
+            "https://services.arcgis.com/xyz/FeatureServer"
+        )
+        assert result == "https://services.arcgis.com/xyz/FeatureServer/2"
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_layer_zero_when_metadata_unavailable(
+        self, arcgis_config
+    ):
+        plugin = ArcGISPlugin(arcgis_config)
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
+        plugin.feature_client = mock_client
+        result = await plugin._ensure_layer_url(
             "https://services.arcgis.com/xyz/FeatureServer"
         )
         assert result == "https://services.arcgis.com/xyz/FeatureServer/0"
 
-    def test_preserves_existing_layer_index(self):
-        result = ArcGISPlugin._ensure_layer_url(
+    @pytest.mark.asyncio
+    async def test_preserves_existing_layer_index(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.feature_client = AsyncMock()  # must not be consulted
+        result = await plugin._ensure_layer_url(
             "https://services.arcgis.com/xyz/FeatureServer/3"
         )
         assert result == "https://services.arcgis.com/xyz/FeatureServer/3"
+        plugin.feature_client.get.assert_not_called()
 
-    def test_handles_map_server(self):
-        result = ArcGISPlugin._ensure_layer_url(
+    @pytest.mark.asyncio
+    async def test_handles_map_server(self, arcgis_config):
+        plugin = self._plugin_with_meta(
+            arcgis_config, {"layers": [{"id": 0, "name": "Base"}]}
+        )
+        result = await plugin._ensure_layer_url(
             "https://services.arcgis.com/xyz/MapServer"
         )
         assert result == "https://services.arcgis.com/xyz/MapServer/0"
 
-    def test_strips_trailing_slash(self):
-        result = ArcGISPlugin._ensure_layer_url(
+    @pytest.mark.asyncio
+    async def test_strips_trailing_slash(self, arcgis_config):
+        plugin = self._plugin_with_meta(
+            arcgis_config, {"layers": [{"id": 0, "name": "Base"}]}
+        )
+        result = await plugin._ensure_layer_url(
             "https://services.arcgis.com/xyz/FeatureServer/"
         )
         assert result == "https://services.arcgis.com/xyz/FeatureServer/0"
+
+    @pytest.mark.asyncio
+    async def test_query_data_uses_non_zero_layer_index(self, arcgis_config):
+        """Regression: a service whose only layer is at index 1 (e.g. the
+        Worcester Parcel Polygons service) must be queried at /1, not /0."""
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+
+        meta_response = Mock()
+        meta_response.raise_for_status = Mock()
+        meta_response.json.return_value = {
+            "layers": [{"id": 1, "name": "Parcel Polygons"}]
+        }
+        query_response = Mock()
+        query_response.status_code = 200
+        query_response.raise_for_status = Mock()
+        query_response.json.return_value = {
+            "features": [{"attributes": {"MAP_PAR_ID": "12-345"}}]
+        }
+
+        mock_feature_client = AsyncMock()
+        mock_feature_client.get = AsyncMock(side_effect=[meta_response, query_response])
+        plugin.feature_client = mock_feature_client
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc",
+                "title": "Parcels",
+                "service_url": (
+                    "https://services.arcgis.com/xyz/Parcel_Polygons/FeatureServer"
+                ),
+            },
+        ):
+            records = await plugin.query_data("abc", {"where": "1=1"}, 10)
+
+        meta_url = mock_feature_client.get.call_args_list[0][0][0]
+        query_url = mock_feature_client.get.call_args_list[1][0][0]
+        assert meta_url.endswith("/FeatureServer")
+        assert "/FeatureServer/1/query" in query_url
+        assert records == [{"MAP_PAR_ID": "12-345"}]
 
 
 # ── WhereValidator ─────────────────────────────────────────────────────
@@ -321,9 +417,7 @@ class TestWhereValidatorAgainstSchema:
         WhereValidator.validate_against_schema("FOO='x'", set())
 
     def test_valid_field_passes(self):
-        WhereValidator.validate_against_schema(
-            "STATUS='Active'", {"STATUS", "NAME"}
-        )
+        WhereValidator.validate_against_schema("STATUS='Active'", {"STATUS", "NAME"})
 
     def test_typo_field_raises_with_suggestion(self):
         with pytest.raises(ValueError, match="STATUUS"):
@@ -342,9 +436,7 @@ class TestWhereValidatorAgainstSchema:
 
     def test_unknown_field_no_close_match(self):
         with pytest.raises(ValueError, match="XYZQR"):
-            WhereValidator.validate_against_schema(
-                "XYZQR='foo'", {"STATUS", "NAME"}
-            )
+            WhereValidator.validate_against_schema("XYZQR='foo'", {"STATUS", "NAME"})
 
     def test_sql_keywords_not_treated_as_fields(self):
         # IS, NULL, AND, OR, IN, LIKE — all SQL keywords, not fields.
@@ -355,21 +447,15 @@ class TestWhereValidatorAgainstSchema:
     def test_case_sensitive_field_match(self):
         # ArcGIS field names are case-sensitive. STATUS != status.
         with pytest.raises(ValueError, match="status"):
-            WhereValidator.validate_against_schema(
-                "status='Active'", {"STATUS"}
-            )
+            WhereValidator.validate_against_schema("status='Active'", {"STATUS"})
 
     def test_string_values_not_treated_as_fields(self):
         # The literal 'Park' must not be flagged as an unknown field.
-        WhereValidator.validate_against_schema(
-            "NAME='Park'", {"NAME"}
-        )
+        WhereValidator.validate_against_schema("NAME='Park'", {"NAME"})
 
     def test_function_call_field_inside(self):
         # UPPER is a keyword; STATUS inside is the real field.
-        WhereValidator.validate_against_schema(
-            "UPPER(STATUS)='ACTIVE'", {"STATUS"}
-        )
+        WhereValidator.validate_against_schema("UPPER(STATUS)='ACTIVE'", {"STATUS"})
 
 
 # ── Config schema ──────────────────────────────────────────────────────
