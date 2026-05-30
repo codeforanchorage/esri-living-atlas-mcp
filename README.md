@@ -43,7 +43,7 @@ curl -sS -X POST https://worcester-gis.codeforanchorage.org/mcp \
 | `arcgis__get_dataset` | Fetch a dataset's metadata and service URL |
 | `arcgis__get_layer_schema` | List a dataset's fields (name, type, alias, coded values), optionally filtered by `keyword` |
 | `arcgis__get_distinct_values` | List the distinct values in a field (with optional `like` / `where`) to confirm exact codes |
-| `arcgis__query_data` | Query features from a dataset (supports `where`, `out_fields`, `limit`) |
+| `arcgis__query_data` | Query features from a dataset (supports `where`, `out_fields`, `order_by`, `limit`). Output leads with a `TOTAL MATCHING` count, so "how many X?" needs no paging. |
 | `arcgis__spatial_query_point` | Point-in-polygon: which polygon(s) contain a given `lon`/`lat` |
 | `arcgis__get_aggregations` | Facet counts across the catalog (e.g. by `type`, `tags`, `categories`) |
 
