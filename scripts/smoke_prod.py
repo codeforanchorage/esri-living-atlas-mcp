@@ -86,19 +86,32 @@ try:
 except Exception as e:
     check("initialize", False, repr(e))
 
-# 3. tools/list -- expect the four arcgis tools, with the type filter advertised
+# 3. tools/list -- expect the seven arcgis tools, with the type filter advertised
 try:
     r = rpc("tools/list")
     tools = {t["name"]: t for t in r["result"]["tools"]}
-    has_four = len(tools) == 4 and "arcgis__search_datasets" in tools
+    expected = {
+        "arcgis__search_datasets",
+        "arcgis__get_dataset",
+        "arcgis__get_aggregations",
+        "arcgis__query_data",
+        "arcgis__get_layer_schema",
+        "arcgis__get_distinct_values",
+        "arcgis__spatial_query_point",
+    }
+    has_all = set(tools) == expected
     type_arg = "type" in (
         tools.get("arcgis__search_datasets", {})
         .get("inputSchema", {})
         .get("properties", {})
     )
-    check("tools/list (4 tools + type filter)", has_four and type_arg, f"{list(tools)}")
+    check(
+        "tools/list (7 tools + type filter)",
+        has_all and type_arg,
+        f"{sorted(tools)}",
+    )
 except Exception as e:
-    check("tools/list (4 tools + type filter)", False, repr(e))
+    check("tools/list (7 tools + type filter)", False, repr(e))
 
 # 4. type filter actually restricts results -- the catalog is PDF-heavy, so a
 #    bare "election" search is all PDFs; type=Feature Service must drop them.
@@ -196,7 +209,62 @@ if permits_id:
     except Exception as e:
         check("verification query (active ADU permits)", False, repr(e))
 
-# 9. get_aggregations sanity
+# 9. get_layer_schema -- list fields for Building Permits
+if permits_id:
+    try:
+        t = text_of(call_tool("get_layer_schema", {"item_id": permits_id}))
+        ok = "Fields (" in t and "Record_Status" in t
+        check("get_layer_schema(Building Permits)", ok, t.split("\n")[0][:60])
+    except Exception as e:
+        check("get_layer_schema(Building Permits)", False, repr(e))
+
+# 10. get_distinct_values -- Record_Status should include Active and Complete
+if permits_id:
+    try:
+        t = text_of(
+            call_tool(
+                "get_distinct_values",
+                {"item_id": permits_id, "field": "Record_Status", "limit": 25},
+            )
+        )
+        ok = "Active" in t and "distinct value" in t
+        check("get_distinct_values(Record_Status)", ok, t.replace("\n", " ")[:60])
+    except Exception as e:
+        check("get_distinct_values(Record_Status)", False, repr(e))
+
+# 11. spatial_query_point -- which parcel contains a point in Worcester?
+#     Parcel Polygons is the canonical /1-layer service (also exercises the
+#     layer-index fix through the spatial path).
+try:
+    s = text_of(
+        call_tool(
+            "search_datasets",
+            {"q": "parcel", "type": "Feature Service", "limit": 5},
+        )
+    )
+    m = re.search(r"Parcel Polygons\s*\n\s*ID:\s*([0-9a-f]{32})", s)
+    parcels_id = m.group(1) if m else None
+    if parcels_id:
+        t = text_of(
+            call_tool(
+                "spatial_query_point",
+                {
+                    "item_id": parcels_id,
+                    "lon": -71.802,
+                    "lat": 42.262,
+                    "out_fields": "MAP_PAR_ID,POLY_TYPE",
+                    "limit": 3,
+                },
+            )
+        )
+        ok = "Returned" in t and "POLY_TYPE" in t and "Invalid URL" not in t
+        check("spatial_query_point(parcel @ point)", ok, t.split("\n")[0][:60])
+    else:
+        check("spatial_query_point(parcel @ point)", False, "Parcel Polygons not found")
+except Exception as e:
+    check("spatial_query_point(parcel @ point)", False, repr(e))
+
+# 12. get_aggregations sanity
 try:
     t = text_of(call_tool("get_aggregations", {"field": "type"}))
     check("get_aggregations(type)", "Feature Service" in t, t.replace("\n", " ")[:60])
