@@ -19,6 +19,12 @@ from plugins.arcgis.where_validator import WhereValidator
 
 logger = logging.getLogger(__name__)
 
+# US Census oneline geocoder: free, no API key, nationwide, returns WGS84
+# lon/lat that feed directly into spatial_query_point.
+_CENSUS_GEOCODER_URL = (
+    "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+)
+
 # HTML-tag stripping and a small unicode->ASCII punctuation map. ArcGIS Hub
 # descriptions are authored as HTML and often contain smart quotes, dashes,
 # and non-breaking spaces; cleaning these keeps tool output readable and
@@ -311,10 +317,11 @@ class ArcGISPlugin(DataPlugin):
             ToolDefinition(
                 name="spatial_query_point",
                 description=(
-                    "Point-in-polygon lookup: given a lon/lat (WGS84), return "
-                    "the attributes of every polygon in a dataset that contains "
-                    "the point -- 'which ward / council district / parcel / "
-                    "flood zone is at this location?'. Use on polygon Feature "
+                    "Point-in-polygon lookup: return the attributes of every "
+                    "polygon in a dataset that contains a point -- 'which ward / "
+                    "council district / parcel / flood zone is at this location?'. "
+                    "Provide EITHER a street `address` (geocoded automatically) "
+                    "OR both `lon` and `lat` (WGS84). Use on polygon Feature "
                     "Services (check geometry with get_layer_schema). Returns "
                     "attributes only, no geometry."
                 ),
@@ -325,17 +332,26 @@ class ArcGISPlugin(DataPlugin):
                             "type": "string",
                             "description": "Hub item ID of a polygon Feature Service.",
                         },
+                        "address": {
+                            "type": "string",
+                            "description": (
+                                "Street address to geocode (alternative to "
+                                "lon/lat), e.g. '455 Main St'. Biased to the "
+                                "configured region."
+                            ),
+                        },
                         "lon": {
                             "type": "number",
                             "description": (
                                 "Longitude, WGS84 decimal degrees (-180 to 180). "
-                                "Note: lon first."
+                                "Note: lon first. Omit if `address` is given."
                             ),
                         },
                         "lat": {
                             "type": "number",
                             "description": (
-                                "Latitude, WGS84 decimal degrees (-90 to 90)."
+                                "Latitude, WGS84 decimal degrees (-90 to 90). "
+                                "Omit if `address` is given."
                             ),
                         },
                         "where": {
@@ -356,7 +372,27 @@ class ArcGISPlugin(DataPlugin):
                             "maximum": 50,
                         },
                     },
-                    "required": ["item_id", "lon", "lat"],
+                    "required": ["item_id"],
+                },
+            ),
+            ToolDefinition(
+                name="geocode_address",
+                description=(
+                    "Convert a street address to coordinates (lon/lat, WGS84) via "
+                    "the US Census geocoder. Use the result with "
+                    "spatial_query_point, or call spatial_query_point with "
+                    "`address` directly. Biased to the configured region; include "
+                    "city/state for addresses elsewhere."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "address": {
+                            "type": "string",
+                            "description": "Street address, e.g. '455 Main St'.",
+                        },
+                    },
+                    "required": ["address"],
                 },
             ),
         ]
@@ -491,11 +527,33 @@ class ArcGISPlugin(DataPlugin):
                 item_id = arguments.get("item_id")
                 lon = arguments.get("lon")
                 lat = arguments.get("lat")
-                if not item_id or lon is None or lat is None:
+                address = arguments.get("address")
+                if not item_id:
                     return ToolResult(
                         content=[],
                         success=False,
-                        error_message="item_id, lon, and lat are required",
+                        error_message="item_id is required",
+                    )
+                geocoded_note = ""
+                if (lon is None or lat is None) and address:
+                    candidates = await self.geocode_address(address)
+                    if not candidates:
+                        return ToolResult(
+                            content=[],
+                            success=False,
+                            error_message=f"Could not geocode address: {address}",
+                        )
+                    lon = candidates[0]["lon"]
+                    lat = candidates[0]["lat"]
+                    geocoded_note = (
+                        f"Geocoded '{address}' -> {candidates[0]['matched_address']} "
+                        f"({lat}, {lon})\n\n"
+                    )
+                if lon is None or lat is None:
+                    return ToolResult(
+                        content=[],
+                        success=False,
+                        error_message="Provide either `address` or both `lon` and `lat`.",
                     )
                 limit = arguments.get("limit", 10)
                 records = await self.spatial_query_point(
@@ -510,7 +568,27 @@ class ArcGISPlugin(DataPlugin):
                     content=[
                         {
                             "type": "text",
-                            "text": self._format_query_results(records, limit),
+                            "text": geocoded_note
+                            + self._format_query_results(records, limit),
+                        }
+                    ],
+                    success=True,
+                )
+
+            elif tool_name == "geocode_address":
+                address = arguments.get("address")
+                if not address:
+                    return ToolResult(
+                        content=[],
+                        success=False,
+                        error_message="address is required",
+                    )
+                candidates = await self.geocode_address(address)
+                return ToolResult(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": self._format_geocode(address, candidates),
                         }
                     ],
                     success=True,
@@ -866,6 +944,51 @@ class ArcGISPlugin(DataPlugin):
         data = await self._query_layer(layer_url, params)
         return [f.get("attributes", {}) for f in data.get("features", [])]
 
+    async def geocode_address(self, address: str) -> List[Dict[str, Any]]:
+        """Geocode a street address to WGS84 lon/lat via the US Census geocoder.
+
+        Free and key-less. If `geocoder_region` is configured (e.g.
+        'Worcester, MA') it is appended to bias results to this jurisdiction.
+        Returns candidates with matched_address, lon, and lat.
+        """
+        if not address or not address.strip():
+            raise ValueError("address is required")
+        region = (
+            self.plugin_config.geocoder_region if self.plugin_config else ""
+        ) or ""
+        full = address
+        if region and region.lower() not in address.lower():
+            full = f"{address}, {region}"
+
+        params = {
+            "address": full,
+            "benchmark": "Public_AR_Current",
+            "format": "json",
+        }
+        try:
+            response = await self.feature_client.get(
+                _CENSUS_GEOCODER_URL, params=params
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(
+                f"Geocoder error (HTTP {e.response.status_code}): {e.response.text}"
+            ) from e
+
+        matches = response.json().get("result", {}).get("addressMatches", [])
+        results = []
+        for m in matches:
+            coords = m.get("coordinates", {})
+            if coords.get("x") is not None and coords.get("y") is not None:
+                results.append(
+                    {
+                        "matched_address": m.get("matchedAddress", ""),
+                        "lon": coords["x"],
+                        "lat": coords["y"],
+                    }
+                )
+        return results
+
     # ── Health check ────────────────────────────────────────────────────
 
     async def health_check(self) -> bool:
@@ -1073,4 +1196,16 @@ class ArcGISPlugin(DataPlugin):
         lines = [f"{len(values)} distinct value(s) for '{field}':", ""]
         for v in values:
             lines.append(f"  {v}")
+        return "\n".join(lines)
+
+    def _format_geocode(self, address: str, candidates: List[Dict[str, Any]]) -> str:
+        if not candidates:
+            return (
+                f"No geocode match for '{address}'. Try including the city and "
+                f"state, e.g. '{address}, Worcester, MA'."
+            )
+        lines = [f"{len(candidates)} match(es) for '{address}':", ""]
+        for c in candidates:
+            lines.append(f"  {c.get('matched_address', '')}")
+            lines.append(f"    lon: {c.get('lon')}, lat: {c.get('lat')}")
         return "\n".join(lines)

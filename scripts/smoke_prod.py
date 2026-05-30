@@ -98,6 +98,7 @@ try:
         "arcgis__get_layer_schema",
         "arcgis__get_distinct_values",
         "arcgis__spatial_query_point",
+        "arcgis__geocode_address",
     }
     has_all = set(tools) == expected
     type_arg = "type" in (
@@ -106,12 +107,12 @@ try:
         .get("properties", {})
     )
     check(
-        "tools/list (7 tools + type filter)",
+        "tools/list (8 tools + type filter)",
         has_all and type_arg,
         f"{sorted(tools)}",
     )
 except Exception as e:
-    check("tools/list (7 tools + type filter)", False, repr(e))
+    check("tools/list (8 tools + type filter)", False, repr(e))
 
 # 4. type filter actually restricts results -- the catalog is PDF-heavy, so a
 #    bare "election" search is all PDFs; type=Feature Service must drop them.
@@ -269,7 +270,34 @@ try:
 except Exception as e:
     check("spatial_query_point(parcel @ point)", False, repr(e))
 
-# 12. get_aggregations sanity
+# 12. geocode_address -- street address to lon/lat (US Census geocoder)
+try:
+    t = text_of(call_tool("geocode_address", {"address": "455 Main St"}))
+    ok = "match(es)" in t and "lon:" in t and "lat:" in t
+    check("geocode_address(455 Main St)", ok, t.split("\n")[0][:60])
+except Exception as e:
+    check("geocode_address(455 Main St)", False, repr(e))
+
+# 13. spatial_query_point BY ADDRESS -- geocode + point-in-polygon in one call
+if parcels_id:
+    try:
+        t = text_of(
+            call_tool(
+                "spatial_query_point",
+                {
+                    "item_id": parcels_id,
+                    "address": "484 Main St",
+                    "out_fields": "MAP_PAR_ID,POLY_TYPE",
+                    "limit": 2,
+                },
+            )
+        )
+        ok = "Geocoded" in t and "Returned" in t and "Invalid URL" not in t
+        check("spatial_query_point(by address)", ok, t.split("\n")[0][:60])
+    except Exception as e:
+        check("spatial_query_point(by address)", False, repr(e))
+
+# 14. get_aggregations sanity
 try:
     t = text_of(call_tool("get_aggregations", {"field": "type"}))
     check("get_aggregations(type)", "Feature Service" in t, t.replace("\n", " ")[:60])

@@ -92,6 +92,7 @@ class TestGetTools:
             "get_layer_schema",
             "get_distinct_values",
             "spatial_query_point",
+            "geocode_address",
         }
 
 
@@ -558,6 +559,125 @@ class TestTier1Polish:
         assert r.success is True
         assert "Returned 1 record(s)" in r.content[0]["text"]
         assert "TOTAL MATCHING" not in r.content[0]["text"]
+
+
+# ── geocoding ─────────────────────────────────────────────────────────
+
+
+class TestGeocoding:
+    @staticmethod
+    def _plugin(arcgis_config, payload, region="Worcester, MA"):
+        cfg = dict(arcgis_config)
+        cfg["geocoder_region"] = region
+        plugin = ArcGISPlugin(cfg)
+        plugin.plugin_config = ArcGISPluginConfig(**cfg)
+        resp = Mock()
+        resp.raise_for_status = Mock()
+        resp.json.return_value = payload
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=resp)
+        plugin.feature_client = mock_client
+        return plugin, mock_client
+
+    _MATCH = {
+        "result": {
+            "addressMatches": [
+                {
+                    "matchedAddress": "455 MAIN ST, WORCESTER, MA, 01608",
+                    "coordinates": {"x": -71.8021, "y": 42.2634},
+                }
+            ]
+        }
+    }
+
+    @pytest.mark.asyncio
+    async def test_geocode_returns_lonlat(self, arcgis_config):
+        plugin, _ = self._plugin(arcgis_config, self._MATCH)
+        out = await plugin.geocode_address("455 Main St")
+        assert out == [
+            {
+                "matched_address": "455 MAIN ST, WORCESTER, MA, 01608",
+                "lon": -71.8021,
+                "lat": 42.2634,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_geocode_appends_region(self, arcgis_config):
+        plugin, mock_client = self._plugin(arcgis_config, self._MATCH)
+        await plugin.geocode_address("455 Main St")
+        assert (
+            mock_client.get.call_args.kwargs["params"]["address"]
+            == "455 Main St, Worcester, MA"
+        )
+
+    @pytest.mark.asyncio
+    async def test_geocode_skips_region_if_present(self, arcgis_config):
+        plugin, mock_client = self._plugin(arcgis_config, self._MATCH)
+        await plugin.geocode_address("455 Main St, Worcester, MA")
+        assert (
+            mock_client.get.call_args.kwargs["params"]["address"]
+            == "455 Main St, Worcester, MA"
+        )
+
+    @pytest.mark.asyncio
+    async def test_geocode_no_match_returns_empty(self, arcgis_config):
+        plugin, _ = self._plugin(arcgis_config, {"result": {"addressMatches": []}})
+        assert await plugin.geocode_address("nowhere") == []
+
+    @pytest.mark.asyncio
+    async def test_spatial_query_point_geocodes_address(self, arcgis_config):
+        cfg = dict(arcgis_config)
+        cfg["geocoder_region"] = "Worcester, MA"
+        plugin = ArcGISPlugin(cfg)
+        plugin.plugin_config = ArcGISPluginConfig(**cfg)
+        with (
+            patch.object(
+                plugin,
+                "geocode_address",
+                new_callable=AsyncMock,
+                return_value=[
+                    {"matched_address": "455 MAIN ST", "lon": -71.8, "lat": 42.26}
+                ],
+            ),
+            patch.object(
+                plugin,
+                "spatial_query_point",
+                new_callable=AsyncMock,
+                return_value=[{"WARD": "5"}],
+            ) as mock_spatial,
+        ):
+            result = await plugin.execute_tool(
+                "spatial_query_point", {"item_id": "abc", "address": "455 Main St"}
+            )
+        assert result.success is True
+        # geocoded coords were passed to the spatial query
+        assert mock_spatial.call_args[0][1] == -71.8
+        assert mock_spatial.call_args[0][2] == 42.26
+        assert "Geocoded" in result.content[0]["text"]
+        assert "WARD" in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_spatial_query_point_unresolvable_address(self, arcgis_config):
+        cfg = dict(arcgis_config)
+        plugin = ArcGISPlugin(cfg)
+        plugin.plugin_config = ArcGISPluginConfig(**cfg)
+        with patch.object(
+            plugin, "geocode_address", new_callable=AsyncMock, return_value=[]
+        ):
+            result = await plugin.execute_tool(
+                "spatial_query_point", {"item_id": "abc", "address": "nowhere"}
+            )
+        assert result.success is False
+        assert "Could not geocode" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_spatial_query_point_requires_coords_or_address(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+        result = await plugin.execute_tool("spatial_query_point", {"item_id": "abc"})
+        assert result.success is False
+        assert "address" in result.error_message
 
 
 # ── multi-word fallback + aggregation field validation ───────────────

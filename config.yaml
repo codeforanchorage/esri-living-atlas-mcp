@@ -35,6 +35,7 @@ plugins:
     portal_url: "https://opendata.worcesterma.gov"
     city_name: "City of Worcester"
     timeout: 120
+    geocoder_region: "Worcester, MA" # biases address geocoding to Worcester
     # token: "${ARCGIS_TOKEN}"  # Optional: Bearer token for private items
 
 # AWS deployment settings

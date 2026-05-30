@@ -44,7 +44,8 @@ curl -sS -X POST https://worcester-gis.codeforanchorage.org/mcp \
 | `arcgis__get_layer_schema` | List a dataset's fields (name, type, alias, coded values), optionally filtered by `keyword` |
 | `arcgis__get_distinct_values` | List the distinct values in a field (with optional `like` / `where`) to confirm exact codes |
 | `arcgis__query_data` | Query features from a dataset (supports `where`, `out_fields`, `order_by`, `limit`). Output leads with a `TOTAL MATCHING` count, so "how many X?" needs no paging. |
-| `arcgis__spatial_query_point` | Point-in-polygon: which polygon(s) contain a given `lon`/`lat` |
+| `arcgis__spatial_query_point` | Point-in-polygon: which polygon(s) contain a given point — by `lon`/`lat` **or** a street `address` |
+| `arcgis__geocode_address` | Convert a street address to `lon`/`lat` (US Census geocoder, biased to the configured region) |
 | `arcgis__get_aggregations` | Facet counts across the catalog (e.g. by `type`, `tags`, `categories`) |
 
 ### Cutting through the catalog noise: `type` filter
@@ -115,17 +116,20 @@ ArcGIS field names are **case-sensitive**, and codes have exact spellings. Rathe
    ```
 3. **`query_data`** — now write the `where` clause with verified names and values.
 
-### Spatial lookup: `spatial_query_point`
+### Spatial lookup: `spatial_query_point` (by address or coordinates)
 
-"Which polygon contains this location?" — pass a WGS84 `lon`/`lat` (longitude first) and a polygon Feature Service (parcels, wards, council districts, flood zones, …):
+"Which polygon contains this location?" — against a polygon Feature Service (parcels, wards, council districts, flood zones, …). Pass **either a street `address`** (geocoded automatically via the US Census geocoder, biased to `geocoder_region` in `config.yaml`) **or** a WGS84 `lon`/`lat` (longitude first):
 
 ```jsonc
-// arcgis__spatial_query_point
-{ "item_id": "<parcel-polygons-id>", "lon": -71.802, "lat": 42.262,
-  "out_fields": "MAP_PAR_ID,POLY_TYPE", "limit": 3 }
+// arcgis__spatial_query_point — by address
+{ "item_id": "<parcel-polygons-id>", "address": "455 Main St",
+  "out_fields": "MAP_PAR_ID,POLY_TYPE" }
+
+// ...or by coordinates
+{ "item_id": "<parcel-polygons-id>", "lon": -71.802, "lat": 42.262 }
 ```
 
-Returns the attributes of every polygon containing the point (no geometry). Confirm a layer is polygon-based with `get_layer_schema` first.
+Returns the attributes of every polygon containing the point (no geometry); when an address is used, the matched address is shown. You can also geocode on its own with `geocode_address`. Confirm a layer is polygon-based with `get_layer_schema` first.
 
 ---
 
@@ -147,8 +151,9 @@ Once the connector is added, just ask Claude in plain English — it picks the r
 - "What fields does the parcels dataset have?" *(`get_layer_schema`)*
 
 **Spatial**
-- "Which parcel is at latitude 42.262, longitude -71.802?" *(point-in-polygon)*
-- "What council district contains that point?"
+- "Which parcel is at 455 Main St?" *(address geocoded automatically, then point-in-polygon)*
+- "What council district contains 484 Main St?"
+- "Which ward is at latitude 42.262, longitude -71.802?" *(coordinates also work)*
 
 Single keywords match best in discovery; multi-word queries fall back to the most distinctive word automatically if the exact phrase finds nothing.
 
@@ -163,7 +168,7 @@ pip install aiohttp pyyaml
 python3 scripts/local_server.py      # serves http://localhost:8000/mcp
 ```
 
-On startup it connects to the live portal and registers the seven `arcgis__*` tools. Worcester's portal is public, so **no API token is required**. (On a Windows console you may need `PYTHONUTF8=1` for the startup banner's emoji.)
+On startup it connects to the live portal and registers the eight `arcgis__*` tools. Worcester's portal is public, so **no API token is required**. (On a Windows console you may need `PYTHONUTF8=1` for the startup banner's emoji.)
 
 See [Getting Started](docs/GETTING_STARTED.md) for the generic OpenContext setup.
 

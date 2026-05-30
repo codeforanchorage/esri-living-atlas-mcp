@@ -24,6 +24,13 @@ class ArcGISPluginConfig(BaseModel):
     token: Optional[str] = Field(
         None, description="Optional Bearer token for authenticated requests"
     )
+    geocoder_region: str = Field(
+        default="",
+        description=(
+            "Optional region (e.g. 'Worcester, MA') appended to addresses "
+            "during geocoding to bias results to this jurisdiction."
+        ),
+    )
 
     @field_validator("portal_url")
     @classmethod
