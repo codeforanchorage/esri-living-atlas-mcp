@@ -93,13 +93,30 @@ class ArcGISPlugin(DataPlugin):
         return [
             ToolDefinition(
                 name="search_datasets",
-                description=f"Search for datasets in {city}'s ArcGIS Hub catalog",
+                description=(
+                    f"Search {city}'s ArcGIS Hub open data catalog. The catalog is "
+                    "large and document-heavy -- hundreds of PDFs (reports, forms, "
+                    "filings) sit alongside the data -- so to find datasets you can "
+                    "actually query or map, set type='Feature Service'. Each result "
+                    "shows its item type and Hub ID; pass that ID to get_dataset or "
+                    "query_data."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "q": {
                             "type": "string",
                             "description": "Full-text search query",
+                        },
+                        "type": {
+                            "type": "string",
+                            "description": (
+                                "Optional: restrict results to one ArcGIS item type. "
+                                "Use 'Feature Service' for queryable spatial/tabular "
+                                "layers (the analyzable data). Other common values: "
+                                "'PDF', 'Web Map', 'StoryMap', 'Web Mapping "
+                                "Application'."
+                            ),
                         },
                         "limit": {
                             "type": "integer",
@@ -195,7 +212,8 @@ class ArcGISPlugin(DataPlugin):
             if tool_name == "search_datasets":
                 q = arguments.get("q", "")
                 limit = arguments.get("limit", 10)
-                datasets = await self.search_datasets(q, limit)
+                item_type = arguments.get("type")
+                datasets = await self.search_datasets(q, limit, item_type)
                 return ToolResult(
                     content=[
                         {"type": "text", "text": self._format_search_results(datasets)}
@@ -278,12 +296,17 @@ class ArcGISPlugin(DataPlugin):
     # ── DataPlugin abstract method implementations ──────────────────────
 
     async def search_datasets(
-        self, query: str, limit: int = 10
+        self, query: str, limit: int = 10, item_type: Optional[str] = None
     ) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {"q": query, "limit": limit}
+        if item_type:
+            # OGC CQL filter; double single quotes to keep the string literal valid.
+            safe_type = item_type.replace("'", "''")
+            params["filter"] = f"type='{safe_type}'"
         try:
             response = await self.hub_client.get(
                 "/api/search/v1/collections/all/items",
-                params={"q": query, "limit": limit},
+                params=params,
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:

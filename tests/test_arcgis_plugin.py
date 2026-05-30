@@ -187,6 +187,59 @@ class TestExecuteTool:
         assert "Feature Layer" in result.content[0]["text"]
 
 
+# ── search_datasets type filter ───────────────────────────────────────
+
+
+class TestSearchDatasetsTypeFilter:
+    @staticmethod
+    def _plugin_capturing_params(arcgis_config):
+        """Plugin whose hub_client records the params of the search request."""
+        plugin = ArcGISPlugin(arcgis_config)
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json.return_value = {"features": []}
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        plugin.hub_client = mock_client
+        return plugin, mock_client
+
+    @pytest.mark.asyncio
+    async def test_type_filter_adds_cql_filter(self, arcgis_config):
+        plugin, mock_client = self._plugin_capturing_params(arcgis_config)
+        await plugin.search_datasets("election", 20, "Feature Service")
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["q"] == "election"
+        assert params["limit"] == 20
+        assert params["filter"] == "type='Feature Service'"
+
+    @pytest.mark.asyncio
+    async def test_no_type_filter_omits_filter_param(self, arcgis_config):
+        plugin, mock_client = self._plugin_capturing_params(arcgis_config)
+        await plugin.search_datasets("parks", 10)
+        params = mock_client.get.call_args.kwargs["params"]
+        assert "filter" not in params
+
+    @pytest.mark.asyncio
+    async def test_type_filter_escapes_single_quotes(self, arcgis_config):
+        # Defend the CQL string literal against injection / breakage.
+        plugin, mock_client = self._plugin_capturing_params(arcgis_config)
+        await plugin.search_datasets("x", 10, "Weird'Type")
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["filter"] == "type='Weird''Type'"
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_passes_type_through(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+        with patch.object(
+            plugin, "search_datasets", new_callable=AsyncMock, return_value=[]
+        ) as mock_search:
+            await plugin.execute_tool(
+                "search_datasets", {"q": "election", "type": "Feature Service"}
+            )
+        mock_search.assert_awaited_once_with("election", 10, "Feature Service")
+
+
 # ── query_data two-hop resolution ─────────────────────────────────────
 
 

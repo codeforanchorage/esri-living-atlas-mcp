@@ -1,7 +1,7 @@
-lambda_name     = "worcester-gis-mcp-prod"
-stage_name      = "prod"
-aws_region      = "us-west-2"
-config_file     = "config.yaml"
+lambda_name = "worcester-gis-mcp-prod"
+stage_name  = "prod"
+aws_region  = "us-west-2"
+config_file = "config.yaml"
 # 1024 MB: aggregate_by_polygon holds up to AGG_SOURCE_LIMIT source features in
 # memory plus a bounded 32-entry polygon cache. Also buys more Lambda
 # CPU, which accelerates the pure-Python point-in-polygon work.
