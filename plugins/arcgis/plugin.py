@@ -4,8 +4,10 @@ This plugin provides access to ArcGIS Hub open data catalogs
 via the OGC API - Records (Hub Search API) and ArcGIS Feature Services.
 """
 
+import html
 import logging
 import re
+import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +18,24 @@ from plugins.arcgis.config_schema import ArcGISPluginConfig
 from plugins.arcgis.where_validator import WhereValidator
 
 logger = logging.getLogger(__name__)
+
+# HTML-tag stripping and a small unicode->ASCII punctuation map. ArcGIS Hub
+# descriptions are authored as HTML and often contain smart quotes, dashes,
+# and non-breaking spaces; cleaning these keeps tool output readable and
+# ASCII-safe (e.g. for M365 Copilot).
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_UNICODE_PUNCT = {
+    "‘": "'",
+    "’": "'",
+    "“": '"',
+    "”": '"',
+    "–": "-",
+    "—": "--",
+    "…": "...",
+    " ": " ",
+    "·": "-",
+    "•": "-",
+}
 
 
 class ArcGISPlugin(DataPlugin):
@@ -170,10 +190,13 @@ class ArcGISPlugin(DataPlugin):
             ToolDefinition(
                 name="query_data",
                 description=(
-                    "Query records from an ArcGIS Feature Service. Provide the Hub "
-                    "dataset ID — the plugin resolves the Feature Service URL "
-                    "automatically (two-hop). Use get_dataset first to confirm the "
-                    "dataset has a queryable service URL."
+                    "Query records from an ArcGIS Feature Service by Hub dataset "
+                    "ID (the plugin resolves the service URL automatically). The "
+                    "output leads with TOTAL MATCHING, the full count of records "
+                    "matching `where` -- so for 'how many X?' you do not need to "
+                    "page through results. Use `order_by` (e.g. 'Date_Submitted "
+                    "DESC') for most-recent / top-N questions, and "
+                    "get_layer_schema first for CASE-SENSITIVE field names."
                 ),
                 input_schema={
                     "type": "object",
@@ -191,6 +214,14 @@ class ArcGISPlugin(DataPlugin):
                             "type": "string",
                             "description": "Comma-separated field names to return",
                             "default": "*",
+                        },
+                        "order_by": {
+                            "type": "string",
+                            "description": (
+                                "Optional ORDER BY, e.g. 'Date_Submitted DESC' "
+                                "for most-recent-first. Field names are "
+                                "CASE-SENSITIVE."
+                            ),
                         },
                         "limit": {
                             "type": "integer",
@@ -392,12 +423,23 @@ class ArcGISPlugin(DataPlugin):
                 out_fields = arguments.get("out_fields", "*")
                 limit = arguments.get("limit", 100)
                 filters = {"where": where, "out_fields": out_fields}
+                if arguments.get("order_by"):
+                    filters["order_by"] = arguments["order_by"]
                 records = await self.query_data(dataset_id, filters, limit)
+                # Total match count is best-effort: a count failure must not
+                # hide the records we already fetched.
+                try:
+                    total = await self.get_record_count(dataset_id, where)
+                except Exception as count_err:
+                    logger.warning(f"Could not get record count: {count_err}")
+                    total = None
                 return ToolResult(
                     content=[
                         {
                             "type": "text",
-                            "text": self._format_query_results(records, limit),
+                            "text": self._format_query_results(
+                                records, limit, total=total
+                            ),
                         }
                     ],
                     success=True,
@@ -540,8 +582,8 @@ class ArcGISPlugin(DataPlugin):
         result = self._extract_dataset_summary(props)
         result.update(
             {
-                "snippet": props.get("snippet", ""),
-                "licenseInfo": props.get("licenseInfo", ""),
+                "snippet": self._clean_text(props.get("snippet", "")),
+                "licenseInfo": self._clean_text(props.get("licenseInfo", "")),
                 "spatialReference": props.get("spatialReference", ""),
                 "geometryType": props.get("geometryType", ""),
                 "additionalResources": props.get("additionalResources", []),
@@ -576,6 +618,7 @@ class ArcGISPlugin(DataPlugin):
         where_clause = filters.get("where", "1=1") if filters else "1=1"
         where_clause = WhereValidator.validate(where_clause)
         out_fields = filters.get("out_fields", "*") if filters else "*"
+        order_by = filters.get("order_by") if filters else None
 
         service_url = await self._ensure_layer_url(service_url)
         query_url = f"{service_url}/query"
@@ -587,6 +630,8 @@ class ArcGISPlugin(DataPlugin):
             "f": "json",
             "returnGeometry": "false",
         }
+        if order_by:
+            params["orderByFields"] = order_by
 
         try:
             response = await self.feature_client.get(query_url, params=params)
@@ -698,6 +743,16 @@ class ArcGISPlugin(DataPlugin):
                 + (f" -- {details}" if details else "")
             )
         return data
+
+    async def get_record_count(self, item_id: str, where: str = "1=1") -> int:
+        """Total number of records matching `where` (returnCountOnly)."""
+        layer_url = await self._layer_url_for_item(item_id)
+        where_clause = WhereValidator.validate(where)
+        data = await self._query_layer(
+            layer_url,
+            {"where": where_clause, "returnCountOnly": "true", "f": "json"},
+        )
+        return int(data.get("count", 0))
 
     async def get_layer_schema(
         self, item_id: str, keyword: Optional[str] = None
@@ -853,8 +908,26 @@ class ArcGISPlugin(DataPlugin):
             return ""
 
     @staticmethod
+    def _clean_text(value: Any) -> str:
+        """Strip HTML and normalize to readable ASCII.
+
+        Hub descriptions are HTML with smart quotes, em-dashes, and
+        non-breaking spaces. Unescape entities, drop tags, map common unicode
+        punctuation to ASCII, then transliterate/drop anything still non-ASCII
+        and collapse whitespace.
+        """
+        if value is None:
+            return ""
+        text = html.unescape(str(value))
+        text = _HTML_TAG_RE.sub(" ", text)
+        for uni, ascii_ in _UNICODE_PUNCT.items():
+            text = text.replace(uni, ascii_)
+        text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+        return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
     def _extract_dataset_summary(props: Dict[str, Any]) -> Dict[str, Any]:
-        description = props.get("description", "") or ""
+        description = ArcGISPlugin._clean_text(props.get("description", "") or "")
         if len(description) > 300:
             description = description[:300] + "..."
 
@@ -915,16 +988,25 @@ class ArcGISPlugin(DataPlugin):
         ]
         return "\n".join(lines)
 
-    def _format_query_results(self, records: List[Dict[str, Any]], limit: int) -> str:
+    def _format_query_results(
+        self, records: List[Dict[str, Any]], limit: int, total: Optional[int] = None
+    ) -> str:
         if not records:
+            if total is not None:
+                return f"TOTAL MATCHING: {total}\nNo records on this page."
             return "No records returned."
 
-        lines = [f"Returned {len(records)} record(s) (limit: {limit}):\n"]
+        lines = []
+        if total is not None:
+            lines.append(f"TOTAL MATCHING: {total}")
+        lines.append(f"Returned {len(records)} record(s) (limit: {limit}):")
+        lines.append("")
 
         for i, record in enumerate(records, 1):
             lines.append(f"Record {i}:")
             for key, value in record.items():
-                lines.append(f"  {key}: {value}")
+                clean = self._clean_text(value) if isinstance(value, str) else value
+                lines.append(f"  {key}: {clean}")
             lines.append("")
 
         return "\n".join(lines)

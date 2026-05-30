@@ -452,6 +452,114 @@ class TestQueryDataTwoHop:
         assert len(records) == 1
 
 
+# ── Tier 1 polish: clean text, total count, order_by ──────────────────
+
+
+class TestTier1Polish:
+    def test_clean_text_strips_html_and_entities(self):
+        out = ArcGISPlugin._clean_text("A<div><br/></div>B&nbsp;&amp; C")
+        assert "<" not in out and ">" not in out
+        assert "&nbsp;" not in out and "&amp;" not in out
+        assert "A" in out and "B" in out and "& C" in out
+
+    def test_clean_text_normalizes_unicode_to_ascii(self):
+        out = ArcGISPlugin._clean_text("café — “q” end")
+        assert all(ord(c) < 128 for c in out)
+        assert "cafe" in out and '"q"' in out and "--" in out
+
+    def test_clean_text_handles_none(self):
+        assert ArcGISPlugin._clean_text(None) == ""
+
+    def test_format_query_results_cleans_html_in_values(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        out = plugin._format_query_results([{"desc": "a<br/>b"}], 1)
+        assert "<br" not in out and "a b" in out
+
+    def test_format_query_results_shows_total(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        out = plugin._format_query_results([{"x": 1}], 1, total=4242)
+        assert "TOTAL MATCHING: 4242" in out
+        assert "Returned 1 record(s)" in out
+
+    @pytest.mark.asyncio
+    async def test_query_data_passes_order_by(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+        resp = Mock()
+        resp.status_code = 200
+        resp.raise_for_status = Mock()
+        resp.json.return_value = {"features": [{"attributes": {"x": 1}}]}
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=resp)
+        plugin.feature_client = mock_client
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={"id": "a", "service_url": "https://s/FeatureServer/1"},
+        ):
+            await plugin.query_data(
+                "a", {"where": "1=1", "order_by": "Date_Submitted DESC"}, 5
+            )
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["orderByFields"] == "Date_Submitted DESC"
+
+    @pytest.mark.asyncio
+    async def test_get_record_count_returns_count(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+        resp = Mock()
+        resp.raise_for_status = Mock()
+        resp.json.return_value = {"count": 4242}
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=resp)
+        plugin.feature_client = mock_client
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={"id": "a", "service_url": "https://s/FeatureServer/1"},
+        ):
+            n = await plugin.get_record_count("a", "1=1")
+        assert n == 4242
+        assert mock_client.get.call_args.kwargs["params"]["returnCountOnly"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_execute_query_data_includes_total(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+        with (
+            patch.object(
+                plugin, "query_data", new_callable=AsyncMock, return_value=[{"n": "A"}]
+            ),
+            patch.object(
+                plugin, "get_record_count", new_callable=AsyncMock, return_value=4242
+            ),
+        ):
+            r = await plugin.execute_tool("query_data", {"dataset_id": "a"})
+        assert "TOTAL MATCHING: 4242" in r.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_execute_query_data_count_failure_is_nonfatal(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+        with (
+            patch.object(
+                plugin, "query_data", new_callable=AsyncMock, return_value=[{"n": "A"}]
+            ),
+            patch.object(
+                plugin,
+                "get_record_count",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            r = await plugin.execute_tool("query_data", {"dataset_id": "a"})
+        assert r.success is True
+        assert "Returned 1 record(s)" in r.content[0]["text"]
+        assert "TOTAL MATCHING" not in r.content[0]["text"]
+
+
 # ── Layer URL helper ───────────────────────────────────────────────────
 
 

@@ -173,10 +173,15 @@ if permits_id:
                 "query_data", {"dataset_id": permits_id, "where": "1=1", "limit": 1}
             )
         )
-        ok = "Returned" in t and "Invalid URL" not in t and "failed" not in t
-        check("query_data total (layer resolves)", ok, t.split("\n")[0][:60])
+        ok = (
+            "TOTAL MATCHING:" in t
+            and "Returned" in t
+            and "Invalid URL" not in t
+            and "failed" not in t
+        )
+        check("query_data total count (TOTAL MATCHING)", ok, t.split("\n")[0][:60])
     except Exception as e:
-        check("query_data total (layer resolves)", False, repr(e))
+        check("query_data total count (TOTAL MATCHING)", False, repr(e))
 
 # 8. VERIFICATION QUERY -- active ADU building permits, selected fields.
 #    This is the headline end-to-end check: where clause + out_fields against
