@@ -78,17 +78,21 @@ class TestInitialization:
 
 
 class TestGetTools:
-    def test_get_tools_returns_four_tools(self, arcgis_config):
+    def test_get_tools_returns_expected_tools(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
         plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
         tools = plugin.get_tools()
 
-        assert len(tools) == 4
-        tool_names = [t.name for t in tools]
-        assert "search_datasets" in tool_names
-        assert "get_dataset" in tool_names
-        assert "get_aggregations" in tool_names
-        assert "query_data" in tool_names
+        tool_names = {t.name for t in tools}
+        assert tool_names == {
+            "search_datasets",
+            "get_dataset",
+            "get_aggregations",
+            "query_data",
+            "get_layer_schema",
+            "get_distinct_values",
+            "spatial_query_point",
+        }
 
 
 # ── execute_tool ───────────────────────────────────────────────────────
@@ -238,6 +242,140 @@ class TestSearchDatasetsTypeFilter:
                 "search_datasets", {"q": "election", "type": "Feature Service"}
             )
         mock_search.assert_awaited_once_with("election", 10, "Feature Service")
+
+
+# ── schema / distinct values / spatial point ──────────────────────────
+
+
+class TestSchemaDistinctSpatial:
+    @staticmethod
+    def _plugin(arcgis_config, meta=None, query_payload=None):
+        """Plugin with get_dataset stubbed to a layer-bearing service and a
+        feature_client that returns `meta` for ?f=json and `query_payload`
+        for /query calls."""
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+
+        def make_response(payload):
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status = Mock()
+            resp.json.return_value = payload
+            return resp
+
+        async def fake_get(url, params=None):
+            params = params or {}
+            if params.get("f") == "json" and not url.endswith("/query"):
+                return make_response(meta or {})
+            return make_response(query_payload or {"features": []})
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=fake_get)
+        plugin.feature_client = mock_client
+
+        # _layer_url_for_item -> get_dataset resolves to a layer at index 1.
+        async def fake_dataset(item_id):
+            return {
+                "id": item_id,
+                "service_url": "https://services1.arcgis.com/x/Parcels/FeatureServer/1",
+            }
+
+        plugin.get_dataset = fake_dataset
+        return plugin, mock_client
+
+    @pytest.mark.asyncio
+    async def test_get_layer_schema_lists_fields(self, arcgis_config):
+        meta = {
+            "name": "Parcels",
+            "geometryType": "esriGeometryPolygon",
+            "fields": [
+                {"name": "OBJECTID", "type": "esriFieldTypeOID", "alias": "OBJECTID"},
+                {
+                    "name": "MAP_PAR_ID",
+                    "type": "esriFieldTypeString",
+                    "alias": "Map ID",
+                },
+            ],
+        }
+        plugin, _ = self._plugin(arcgis_config, meta=meta)
+        schema = await plugin.get_layer_schema("abc")
+        names = [f["name"] for f in schema["fields"]]
+        assert names == ["OBJECTID", "MAP_PAR_ID"]
+        assert schema["geometry_type"] == "esriGeometryPolygon"
+
+    @pytest.mark.asyncio
+    async def test_get_layer_schema_keyword_filters(self, arcgis_config):
+        meta = {
+            "name": "Parcels",
+            "fields": [
+                {"name": "OBJECTID", "type": "esriFieldTypeOID", "alias": "OBJECTID"},
+                {
+                    "name": "MAP_PAR_ID",
+                    "type": "esriFieldTypeString",
+                    "alias": "Map ID",
+                },
+            ],
+        }
+        plugin, _ = self._plugin(arcgis_config, meta=meta)
+        schema = await plugin.get_layer_schema("abc", keyword="map")
+        assert [f["name"] for f in schema["fields"]] == ["MAP_PAR_ID"]
+
+    @pytest.mark.asyncio
+    async def test_get_distinct_values_extracts_and_sets_params(self, arcgis_config):
+        payload = {
+            "features": [
+                {"attributes": {"Record_Status": "Active"}},
+                {"attributes": {"Record_Status": "Complete"}},
+            ]
+        }
+        plugin, mock_client = self._plugin(arcgis_config, query_payload=payload)
+        values = await plugin.get_distinct_values("abc", "Record_Status")
+        assert values == ["Active", "Complete"]
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["returnDistinctValues"] == "true"
+        assert params["outFields"] == "Record_Status"
+        assert params["orderByFields"] == "Record_Status"
+
+    @pytest.mark.asyncio
+    async def test_get_distinct_values_like_builds_clause(self, arcgis_config):
+        plugin, mock_client = self._plugin(
+            arcgis_config, query_payload={"features": []}
+        )
+        await plugin.get_distinct_values("abc", "Permit_For", like="ADU")
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["where"] == "Permit_For LIKE '%ADU%'"
+
+    @pytest.mark.asyncio
+    async def test_spatial_query_point_builds_geometry_params(self, arcgis_config):
+        payload = {"features": [{"attributes": {"WARD": "5"}}]}
+        plugin, mock_client = self._plugin(arcgis_config, query_payload=payload)
+        records = await plugin.spatial_query_point("abc", -71.8, 42.26)
+        assert records == [{"WARD": "5"}]
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["geometry"] == "-71.8,42.26"
+        assert params["geometryType"] == "esriGeometryPoint"
+        assert params["spatialRel"] == "esriSpatialRelIntersects"
+        assert params["inSR"] == 4326
+
+    @pytest.mark.asyncio
+    async def test_spatial_query_point_rejects_bad_coords(self, arcgis_config):
+        plugin, _ = self._plugin(arcgis_config)
+        with pytest.raises(ValueError, match="lon"):
+            await plugin.spatial_query_point("abc", -999, 42.26)
+        with pytest.raises(ValueError, match="lat"):
+            await plugin.spatial_query_point("abc", -71.8, 999)
+
+    @pytest.mark.asyncio
+    async def test_no_service_url_raises(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.plugin_config = ArcGISPluginConfig(**arcgis_config)
+
+        async def no_url(item_id):
+            return {"id": item_id, "service_url": ""}
+
+        plugin.get_dataset = no_url
+        with pytest.raises(ValueError, match="queryable Feature Service URL"):
+            await plugin.get_layer_schema("abc")
 
 
 # ── query_data two-hop resolution ─────────────────────────────────────

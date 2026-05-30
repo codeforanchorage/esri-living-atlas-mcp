@@ -203,6 +203,131 @@ class ArcGISPlugin(DataPlugin):
                     "required": ["dataset_id"],
                 },
             ),
+            ToolDefinition(
+                name="get_layer_schema",
+                description=(
+                    "List a dataset's fields (name, type, alias, coded values) "
+                    "so you can write a correct query_data WHERE clause without "
+                    "guessing. Field names are CASE-SENSITIVE. Pass a Hub item "
+                    "ID; optional `keyword` shows only matching fields. Typical "
+                    "chain: search_datasets -> get_layer_schema -> query_data."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Hub item ID of a Feature Service / Table.",
+                        },
+                        "keyword": {
+                            "type": "string",
+                            "description": (
+                                "Optional: only show fields whose name or alias "
+                                "contains this term."
+                            ),
+                        },
+                    },
+                    "required": ["item_id"],
+                },
+            ),
+            ToolDefinition(
+                name="get_distinct_values",
+                description=(
+                    "List the distinct values in one field of a dataset -- to "
+                    "confirm the exact spelling/format of codes before filtering "
+                    "(e.g. 'Residential' vs '1 or 2 Family Dwelling'). Field "
+                    "names are CASE-SENSITIVE (use get_layer_schema first). "
+                    "Optional `like` substring-narrows the values."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Hub item ID of a Feature Service / Table.",
+                        },
+                        "field": {
+                            "type": "string",
+                            "description": (
+                                "Field name (CASE-SENSITIVE) to list values for."
+                            ),
+                        },
+                        "like": {
+                            "type": "string",
+                            "description": (
+                                "Optional substring; only values containing it "
+                                "are returned."
+                            ),
+                        },
+                        "where": {
+                            "type": "string",
+                            "description": (
+                                "Optional WHERE clause to narrow contributing records."
+                            ),
+                            "default": "1=1",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max distinct values (default 200).",
+                            "default": 200,
+                            "minimum": 1,
+                            "maximum": 1000,
+                        },
+                    },
+                    "required": ["item_id", "field"],
+                },
+            ),
+            ToolDefinition(
+                name="spatial_query_point",
+                description=(
+                    "Point-in-polygon lookup: given a lon/lat (WGS84), return "
+                    "the attributes of every polygon in a dataset that contains "
+                    "the point -- 'which ward / council district / parcel / "
+                    "flood zone is at this location?'. Use on polygon Feature "
+                    "Services (check geometry with get_layer_schema). Returns "
+                    "attributes only, no geometry."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": "Hub item ID of a polygon Feature Service.",
+                        },
+                        "lon": {
+                            "type": "number",
+                            "description": (
+                                "Longitude, WGS84 decimal degrees (-180 to 180). "
+                                "Note: lon first."
+                            ),
+                        },
+                        "lat": {
+                            "type": "number",
+                            "description": (
+                                "Latitude, WGS84 decimal degrees (-90 to 90)."
+                            ),
+                        },
+                        "where": {
+                            "type": "string",
+                            "description": "Optional WHERE clause to further filter.",
+                            "default": "1=1",
+                        },
+                        "out_fields": {
+                            "type": "string",
+                            "description": "Comma-separated field names to return.",
+                            "default": "*",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max features (default 10, max 50).",
+                            "default": 10,
+                            "minimum": 1,
+                            "maximum": 50,
+                        },
+                    },
+                    "required": ["item_id", "lon", "lat"],
+                },
+            ),
         ]
 
     async def execute_tool(
@@ -268,6 +393,77 @@ class ArcGISPlugin(DataPlugin):
                 limit = arguments.get("limit", 100)
                 filters = {"where": where, "out_fields": out_fields}
                 records = await self.query_data(dataset_id, filters, limit)
+                return ToolResult(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": self._format_query_results(records, limit),
+                        }
+                    ],
+                    success=True,
+                )
+
+            elif tool_name == "get_layer_schema":
+                item_id = arguments.get("item_id")
+                if not item_id:
+                    return ToolResult(
+                        content=[],
+                        success=False,
+                        error_message="item_id is required",
+                    )
+                schema = await self.get_layer_schema(item_id, arguments.get("keyword"))
+                return ToolResult(
+                    content=[
+                        {"type": "text", "text": self._format_layer_schema(schema)}
+                    ],
+                    success=True,
+                )
+
+            elif tool_name == "get_distinct_values":
+                item_id = arguments.get("item_id")
+                field = arguments.get("field")
+                if not item_id or not field:
+                    return ToolResult(
+                        content=[],
+                        success=False,
+                        error_message="item_id and field are required",
+                    )
+                values = await self.get_distinct_values(
+                    item_id,
+                    field,
+                    arguments.get("like"),
+                    arguments.get("where", "1=1"),
+                    arguments.get("limit", 200),
+                )
+                return ToolResult(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": self._format_distinct_values(field, values),
+                        }
+                    ],
+                    success=True,
+                )
+
+            elif tool_name == "spatial_query_point":
+                item_id = arguments.get("item_id")
+                lon = arguments.get("lon")
+                lat = arguments.get("lat")
+                if not item_id or lon is None or lat is None:
+                    return ToolResult(
+                        content=[],
+                        success=False,
+                        error_message="item_id, lon, and lat are required",
+                    )
+                limit = arguments.get("limit", 10)
+                records = await self.spatial_query_point(
+                    item_id,
+                    lon,
+                    lat,
+                    arguments.get("where", "1=1"),
+                    arguments.get("out_fields", "*"),
+                    limit,
+                )
                 return ToolResult(
                     content=[
                         {
@@ -465,6 +661,143 @@ class ArcGISPlugin(DataPlugin):
 
         return []
 
+    # ── Schema / distinct values / spatial point ────────────────────────
+
+    async def _layer_url_for_item(self, item_id: str) -> str:
+        """Resolve a Hub item ID to a concrete queryable layer URL."""
+        dataset = await self.get_dataset(item_id)
+        service_url = dataset.get("service_url")
+        if not service_url:
+            raise ValueError(
+                f"Dataset {item_id} does not have a queryable Feature Service URL"
+            )
+        return await self._ensure_layer_url(service_url)
+
+    async def _query_layer(
+        self, layer_url: str, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run an ArcGIS Feature Service /query and return parsed JSON, raising
+        on HTTP errors or error objects embedded in the response body."""
+        query_url = f"{layer_url}/query"
+        try:
+            response = await self.feature_client.get(query_url, params=params)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(
+                f"Feature Service query error (HTTP {e.response.status_code}): "
+                f"{e.response.text}"
+            ) from e
+        data = response.json()
+        err = data.get("error")
+        if err:
+            code = err.get("code", "unknown")
+            msg = err.get("message", "Unknown error")
+            details = "; ".join(err.get("details", []) or [])
+            raise RuntimeError(
+                f"Feature Service query failed (code {code}): {msg}"
+                + (f" -- {details}" if details else "")
+            )
+        return data
+
+    async def get_layer_schema(
+        self, item_id: str, keyword: Optional[str] = None
+    ) -> Dict[str, Any]:
+        layer_url = await self._layer_url_for_item(item_id)
+        try:
+            response = await self.feature_client.get(layer_url, params={"f": "json"})
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(
+                f"Feature Service metadata error (HTTP {e.response.status_code}): "
+                f"{e.response.text}"
+            ) from e
+        meta = response.json()
+        err = meta.get("error")
+        if err:
+            raise RuntimeError(
+                f"Could not read layer schema (code {err.get('code', 'unknown')}): "
+                f"{err.get('message', 'Unknown error')}"
+            )
+        fields = meta.get("fields", []) or []
+        if keyword:
+            kw = keyword.lower()
+            fields = [
+                f
+                for f in fields
+                if kw in (f.get("name", "") or "").lower()
+                or kw in (f.get("alias", "") or "").lower()
+            ]
+        return {
+            "layer_name": meta.get("name", ""),
+            "geometry_type": meta.get("geometryType", ""),
+            "layer_url": layer_url,
+            "fields": fields,
+        }
+
+    async def get_distinct_values(
+        self,
+        item_id: str,
+        field: str,
+        like: Optional[str] = None,
+        where: str = "1=1",
+        limit: int = 200,
+    ) -> List[Any]:
+        layer_url = await self._layer_url_for_item(item_id)
+        where_clause = WhereValidator.validate(where)
+        if like:
+            safe_like = like.replace("'", "''")
+            like_clause = f"{field} LIKE '%{safe_like}%'"
+            where_clause = (
+                like_clause
+                if where_clause in ("", "1=1")
+                else f"({where_clause}) AND {like_clause}"
+            )
+        params = {
+            "where": where_clause,
+            "outFields": field,
+            "returnDistinctValues": "true",
+            "returnGeometry": "false",
+            "orderByFields": field,
+            "resultRecordCount": min(max(limit, 1), 1000),
+            "f": "json",
+        }
+        data = await self._query_layer(layer_url, params)
+        values = []
+        for feat in data.get("features", []):
+            attrs = feat.get("attributes", {})
+            if field in attrs:
+                values.append(attrs[field])
+        return values
+
+    async def spatial_query_point(
+        self,
+        item_id: str,
+        lon: float,
+        lat: float,
+        where: str = "1=1",
+        out_fields: str = "*",
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        if not -180 <= lon <= 180:
+            raise ValueError(f"lon must be between -180 and 180 (got {lon})")
+        if not -90 <= lat <= 90:
+            raise ValueError(f"lat must be between -90 and 90 (got {lat})")
+        layer_url = await self._layer_url_for_item(item_id)
+        where_clause = WhereValidator.validate(where)
+        params = {
+            "where": where_clause,
+            "geometry": f"{lon},{lat}",
+            "geometryType": "esriGeometryPoint",
+            "inSR": 4326,
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": out_fields,
+            "returnGeometry": "false",
+            "resultRecordCount": min(max(limit, 1), 50),
+            "f": "json",
+        }
+        data = await self._query_layer(layer_url, params)
+        return [f.get("attributes", {}) for f in data.get("features", [])]
+
     # ── Health check ────────────────────────────────────────────────────
 
     async def health_check(self) -> bool:
@@ -607,4 +940,42 @@ class ArcGISPlugin(DataPlugin):
                 f"{bucket.get('doc_count', bucket.get('count', 0))} dataset(s)"
             )
 
+        return "\n".join(lines)
+
+    def _format_layer_schema(self, schema: Dict[str, Any]) -> str:
+        fields = schema.get("fields", [])
+        if not fields:
+            return "No fields found for this layer (or none matched the keyword)."
+
+        lines = [
+            f"Layer: {schema.get('layer_name', '')}",
+            f"Geometry: {schema.get('geometry_type', '') or 'none (table)'}",
+            f"Fields ({len(fields)}):",
+            "",
+        ]
+        for f in fields:
+            name = f.get("name", "")
+            ftype = (f.get("type", "") or "").replace("esriFieldType", "")
+            alias = f.get("alias", "")
+            line = f"  {name} ({ftype})"
+            if alias and alias != name:
+                line += f" -- {alias}"
+            lines.append(line)
+            domain = f.get("domain") or {}
+            coded = domain.get("codedValues") if isinstance(domain, dict) else None
+            if coded:
+                sample = ", ".join(
+                    f"{c.get('code')}={c.get('name')}" for c in coded[:8]
+                )
+                more = " ..." if len(coded) > 8 else ""
+                lines.append(f"      coded values: {sample}{more}")
+        return "\n".join(lines)
+
+    def _format_distinct_values(self, field: str, values: List[Any]) -> str:
+        if not values:
+            return f"No distinct values found for '{field}'."
+
+        lines = [f"{len(values)} distinct value(s) for '{field}':", ""]
+        for v in values:
+            lines.append(f"  {v}")
         return "\n".join(lines)
