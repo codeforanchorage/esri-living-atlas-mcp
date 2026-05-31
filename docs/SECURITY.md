@@ -161,5 +161,5 @@ Before merging anything that touches `plugins/anchorage_gis/`,
 
 ## Reporting issues
 
-Email `brendanbabb@gmail.com` for sensitive reports. Public issues
-can go to <https://github.com/codeforanchorage/anchorage-gis-mcp/issues>.
+Email `security@example.org` for sensitive reports. Public issues
+can go to <https://github.com/codeforanchorage/worcester-gis-mcp/issues>.
