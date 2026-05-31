@@ -118,7 +118,7 @@ ArcGIS field names are **case-sensitive**, and codes have exact spellings. Rathe
 "Which polygon contains this location?" — against a polygon Feature Service (parcels, wards, council districts, flood zones, …). Pass **either a street `address`** (geocoded automatically via the US Census geocoder, biased to `geocoder_region` in `config.yaml`) **or** a WGS84 `lon`/`lat` (longitude first):
 
 ```jsonc
-// arcgis__spatial_query_point — by address
+// arcgis__spatial_query_point — by address (455 Main St = Worcester City Hall)
 { "item_id": "<parcel-polygons-id>", "address": "455 Main St",
   "out_fields": "MAP_PAR_ID,POLY_TYPE" }
 
@@ -148,8 +148,8 @@ Once the connector is added, just ask Claude in plain English — it picks the r
 - "What fields does the parcels dataset have?" *(`get_layer_schema`)*
 
 **Spatial**
-- "Which parcel is at 455 Main St?" *(address geocoded automatically, then point-in-polygon)*
-- "What council district contains 484 Main St?"
+- "Which parcel is Worcester City Hall (455 Main St) on?" *(address geocoded automatically, then point-in-polygon)*
+- "What council district contains City Hall?"
 - "Which ward is at latitude 42.262, longitude -71.802?" *(coordinates also work)*
 
 Single keywords match best in discovery; multi-word queries fall back to the most distinctive word automatically if the exact phrase finds nothing.

@@ -336,8 +336,8 @@ class ArcGISPlugin(DataPlugin):
                             "type": "string",
                             "description": (
                                 "Street address to geocode (alternative to "
-                                "lon/lat), e.g. '455 Main St'. Biased to the "
-                                "configured region."
+                                "lon/lat), e.g. '455 Main St' (City Hall). Biased "
+                                "to the configured region."
                             ),
                         },
                         "lon": {
@@ -389,7 +389,7 @@ class ArcGISPlugin(DataPlugin):
                     "properties": {
                         "address": {
                             "type": "string",
-                            "description": "Street address, e.g. '455 Main St'.",
+                            "description": "Street address, e.g. '455 Main St' (City Hall).",
                         },
                     },
                     "required": ["address"],

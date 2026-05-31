@@ -270,13 +270,14 @@ try:
 except Exception as e:
     check("spatial_query_point(parcel @ point)", False, repr(e))
 
-# 12. geocode_address -- street address to lon/lat (US Census geocoder)
+# 12. geocode_address -- street address to lon/lat (US Census geocoder).
+#     455 Main St is Worcester City Hall (a public landmark used as the demo).
 try:
     t = text_of(call_tool("geocode_address", {"address": "455 Main St"}))
     ok = "match(es)" in t and "lon:" in t and "lat:" in t
-    check("geocode_address(455 Main St)", ok, t.split("\n")[0][:60])
+    check("geocode_address(City Hall)", ok, t.split("\n")[0][:60])
 except Exception as e:
-    check("geocode_address(455 Main St)", False, repr(e))
+    check("geocode_address(City Hall)", False, repr(e))
 
 # 13. spatial_query_point BY ADDRESS -- geocode + point-in-polygon in one call
 if parcels_id:
@@ -286,7 +287,7 @@ if parcels_id:
                 "spatial_query_point",
                 {
                     "item_id": parcels_id,
-                    "address": "484 Main St",
+                    "address": "455 Main St",  # Worcester City Hall
                     "out_fields": "MAP_PAR_ID,POLY_TYPE",
                     "limit": 2,
                 },
