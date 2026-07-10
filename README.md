@@ -130,16 +130,20 @@ See [Getting Started](docs/GETTING_STARTED.md) for the generic OpenContext setup
 
 ## Connect to Claude
 
-Add the server as a custom connector in Claude (same steps on Claude.ai and Claude Desktop):
+The server is live. Add it as a custom connector in Claude (same steps on Claude.ai and Claude Desktop):
 
 1. **Settings → Connectors** (or **Customize → Connectors** on claude.ai)
 2. **Add custom connector**
-3. Name it e.g. `San Diego GIS` and paste your deployment's `/mcp` URL
+3. Name it e.g. `San Diego GIS` and paste the URL:
+
+   ```
+   https://7wd4vv84t4.execute-api.us-west-2.amazonaws.com/prod/mcp
+   ```
 
 Quick health check from a terminal:
 
 ```bash
-curl -sS -X POST https://<your-deployment>/mcp \
+curl -sS -X POST https://7wd4vv84t4.execute-api.us-west-2.amazonaws.com/prod/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
 # → {"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}
