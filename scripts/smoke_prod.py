@@ -1,17 +1,16 @@
-"""Production smoke test for the Worcester GIS MCP server.
+"""Deployment smoke test for the San Diego GIS MCP server.
 
 Exercises the JSON-RPC surface and the core arcgis tool chain end-to-end
-against the deployed Lambda, finishing with the "verification query": the
-real Accessory Dwelling Unit (ADU) building-permit lookup used to confirm
-the connector. Read-only; paces calls to stay under the API Gateway rate
-limit (5 rps) and WAF per-IP cap (300/5min).
+against a running deployment, finishing with the "verification query": a
+real parcel lookup at the San Diego City Administration Building (202 C St)
+used to confirm the connector. Read-only; paces calls to stay under typical
+API Gateway rate limits.
 
 Usage:
     python3 scripts/smoke_prod.py [URL]
 
-URL defaults to the production custom domain; override with an argument or
-the OPENCONTEXT_SMOKE_URL env var to point at a different deployment
-(e.g. the raw API Gateway URL or a local server).
+URL defaults to a local server (http://localhost:8000/mcp); override with an
+argument or the OPENCONTEXT_SMOKE_URL env var to point at a deployment.
 """
 
 import json
@@ -24,8 +23,11 @@ import urllib.request
 URL = (
     (sys.argv[1] if len(sys.argv) > 1 else None)
     or os.environ.get("OPENCONTEXT_SMOKE_URL")
-    or "https://worcester-gis.codeforanchorage.org/mcp"
+    or "http://localhost:8000/mcp"
 )
+
+# San Diego City Administration Building -- public landmark used as the demo.
+CITY_HALL_LON, CITY_HALL_LAT = -117.1626, 32.7170
 
 _id = 0
 results = []
@@ -86,7 +88,7 @@ try:
 except Exception as e:
     check("initialize", False, repr(e))
 
-# 3. tools/list -- expect the seven arcgis tools, with the type filter advertised
+# 3. tools/list -- expect the eight arcgis tools, with the type filter advertised
 try:
     r = rpc("tools/list")
     tools = {t["name"]: t for t in r["result"]["tools"]}
@@ -114,64 +116,63 @@ try:
 except Exception as e:
     check("tools/list (8 tools + type filter)", False, repr(e))
 
-# 4. type filter actually restricts results -- the catalog is PDF-heavy, so a
-#    bare "election" search is all PDFs; type=Feature Service must drop them.
+# 4. type filter actually restricts results -- SANDAG's catalog mixes Feature
+#    Services with Service Definitions, web maps, and apps; type='Feature
+#    Service' must return only queryable layers.
 try:
-    plain = text_of(call_tool("search_datasets", {"q": "election", "limit": 20}))
     typed = text_of(
         call_tool(
             "search_datasets",
-            {"q": "election", "type": "Feature Service", "limit": 20},
+            {"q": "parcels", "type": "Feature Service", "limit": 20},
         )
     )
     ok = (
-        "Type: PDF" in plain
-        and "Type: PDF" not in typed
-        and "Type: Feature Service" in typed
+        "Type: Feature Service" in typed
+        and "Type: Service Definition" not in typed
+        and "Type: Web Map" not in typed
     )
     check(
-        "type filter excludes PDFs",
+        "type filter restricts to Feature Services",
         ok,
-        "PDFs dropped" if ok else "filter had no effect",
+        "only Feature Services" if ok else "filter had no effect",
     )
 except Exception as e:
-    check("type filter excludes PDFs", False, repr(e))
+    check("type filter restricts to Feature Services", False, repr(e))
 
-# 5. discovery -- find the Building Permits Feature Service by title
-permits_id = None
+# 5. discovery -- find the SanGIS Parcels Feature Service by title
+parcels_id = None
 try:
     s = text_of(
         call_tool(
             "search_datasets",
-            {"q": "permit", "type": "Feature Service", "limit": 10},
+            {"q": "parcels", "type": "Feature Service", "limit": 20},
         )
     )
-    m = re.search(r"Building Permits\s*\n\s*ID:\s*([0-9a-f]{32})", s)
-    permits_id = m.group(1) if m else None
+    m = re.search(r"\d+\. Parcels\s*\n\s*ID:\s*(\S+)", s)
+    parcels_id = m.group(1) if m else None
     check(
-        "search_datasets finds Building Permits",
-        permits_id is not None,
-        f"id={permits_id}",
+        "search_datasets finds Parcels",
+        parcels_id is not None,
+        f"id={parcels_id}",
     )
 except Exception as e:
-    check("search_datasets finds Building Permits", False, repr(e))
+    check("search_datasets finds Parcels", False, repr(e))
 
-# 6. get_dataset on the discovered id
-if permits_id:
+# 6. get_dataset on the discovered id -- must carry the SanGIS attribution
+if parcels_id:
     try:
-        t = text_of(call_tool("get_dataset", {"dataset_id": permits_id}))
-        check(
-            "get_dataset(Building Permits)", "Building Permits" in t, f"{len(t)} chars"
-        )
+        t = text_of(call_tool("get_dataset", {"dataset_id": parcels_id}))
+        ok = "Parcels" in t and "Attribution:" in t and "SanGIS" in t
+        check("get_dataset(Parcels) with attribution", ok, f"{len(t)} chars")
     except Exception as e:
-        check("get_dataset(Building Permits)", False, repr(e))
+        check("get_dataset(Parcels) with attribution", False, repr(e))
 
-# 7. the layer has queryable records at all (proves layer-index resolution)
-if permits_id:
+# 7. the layer has queryable records at all (proves layer resolution)
+if parcels_id:
     try:
         t = text_of(
             call_tool(
-                "query_data", {"dataset_id": permits_id, "where": "1=1", "limit": 1}
+                "query_data", {"dataset_id": parcels_id, "where": "1=1", "limit": 1}
             )
         )
         ok = (
@@ -184,96 +185,80 @@ if permits_id:
     except Exception as e:
         check("query_data total count (TOTAL MATCHING)", False, repr(e))
 
-# 8. VERIFICATION QUERY -- active ADU building permits, selected fields.
-#    This is the headline end-to-end check: where clause + out_fields against
-#    live City data. ADUs are an active permitting program, so records persist.
-if permits_id:
+# 8. VERIFICATION QUERY -- parcels by APN prefix, selected fields. This is the
+#    headline end-to-end check: where clause + out_fields against live SanGIS
+#    data. Field names on the hosted layers are lowercase.
+if parcels_id:
     try:
         t = text_of(
             call_tool(
                 "query_data",
                 {
-                    "dataset_id": permits_id,
-                    "where": (
-                        "Record_Status='Active' AND "
-                        "Permit_For='Accessory Dwelling Unit (ADU)'"
-                    ),
-                    "out_fields": "Record__,Address,Date_Submitted,Contractor_Name",
+                    "dataset_id": parcels_id,
+                    "where": "apn LIKE '7602%'",
+                    "out_fields": "apn,situs_address,situs_street",
                     "limit": 5,
                 },
             )
         )
         has_rows = "Record 1:" in t
-        right_shape = "Record__:" in t and "Address:" in t
+        right_shape = "apn:" in t and "situs_street:" in t
         no_error = "Invalid URL" not in t and "failed" not in t
         ok = has_rows and right_shape and no_error
         check(
-            "verification query (active ADU permits)",
+            "verification query (parcels by APN prefix)",
             ok,
             t.split("\n")[0][:60] if ok else "ERROR/empty: " + t[:80],
         )
     except Exception as e:
-        check("verification query (active ADU permits)", False, repr(e))
+        check("verification query (parcels by APN prefix)", False, repr(e))
 
-# 9. get_layer_schema -- list fields for Building Permits
-if permits_id:
+# 9. get_layer_schema -- list fields for Parcels
+if parcels_id:
     try:
-        t = text_of(call_tool("get_layer_schema", {"item_id": permits_id}))
-        ok = "Fields (" in t and "Record_Status" in t
-        check("get_layer_schema(Building Permits)", ok, t.split("\n")[0][:60])
+        t = text_of(call_tool("get_layer_schema", {"item_id": parcels_id}))
+        ok = "Fields (" in t and "apn" in t
+        check("get_layer_schema(Parcels)", ok, t.split("\n")[0][:60])
     except Exception as e:
-        check("get_layer_schema(Building Permits)", False, repr(e))
+        check("get_layer_schema(Parcels)", False, repr(e))
 
-# 10. get_distinct_values -- Record_Status should include Active and Complete
-if permits_id:
+# 10. get_distinct_values -- jurisdictions recorded on parcels
+if parcels_id:
     try:
         t = text_of(
             call_tool(
                 "get_distinct_values",
-                {"item_id": permits_id, "field": "Record_Status", "limit": 25},
+                {"item_id": parcels_id, "field": "situs_juris", "limit": 25},
             )
         )
-        ok = "Active" in t and "distinct value" in t
-        check("get_distinct_values(Record_Status)", ok, t.replace("\n", " ")[:60])
+        ok = "distinct value" in t
+        check("get_distinct_values(situs_juris)", ok, t.replace("\n", " ")[:60])
     except Exception as e:
-        check("get_distinct_values(Record_Status)", False, repr(e))
+        check("get_distinct_values(situs_juris)", False, repr(e))
 
-# 11. spatial_query_point -- which parcel contains a point in Worcester?
-#     Parcel Polygons is the canonical /1-layer service (also exercises the
-#     layer-index fix through the spatial path).
-try:
-    s = text_of(
-        call_tool(
-            "search_datasets",
-            {"q": "parcel", "type": "Feature Service", "limit": 5},
-        )
-    )
-    m = re.search(r"Parcel Polygons\s*\n\s*ID:\s*([0-9a-f]{32})", s)
-    parcels_id = m.group(1) if m else None
-    if parcels_id:
+# 11. spatial_query_point -- which parcel contains San Diego City Hall?
+if parcels_id:
+    try:
         t = text_of(
             call_tool(
                 "spatial_query_point",
                 {
                     "item_id": parcels_id,
-                    "lon": -71.802,
-                    "lat": 42.262,
-                    "out_fields": "MAP_PAR_ID,POLY_TYPE",
+                    "lon": CITY_HALL_LON,
+                    "lat": CITY_HALL_LAT,
+                    "out_fields": "apn,situs_address,situs_street",
                     "limit": 3,
                 },
             )
         )
-        ok = "Returned" in t and "POLY_TYPE" in t and "Invalid URL" not in t
-        check("spatial_query_point(parcel @ point)", ok, t.split("\n")[0][:60])
-    else:
-        check("spatial_query_point(parcel @ point)", False, "Parcel Polygons not found")
-except Exception as e:
-    check("spatial_query_point(parcel @ point)", False, repr(e))
+        ok = "Returned" in t and "apn" in t and "Invalid URL" not in t
+        check("spatial_query_point(parcel @ City Hall)", ok, t.split("\n")[0][:60])
+    except Exception as e:
+        check("spatial_query_point(parcel @ City Hall)", False, repr(e))
 
-# 12. geocode_address -- street address to lon/lat (US Census geocoder).
-#     455 Main St is Worcester City Hall (a public landmark used as the demo).
+# 12. geocode_address -- street address to lon/lat (SANDAG composite locator).
 try:
-    t = text_of(call_tool("geocode_address", {"address": "455 Main St"}))
+    t = text_of(call_tool("geocode_address", {"address": "202 C St, San Diego, CA"}))
     ok = "match(es)" in t and "lon:" in t and "lat:" in t
     check("geocode_address(City Hall)", ok, t.split("\n")[0][:60])
 except Exception as e:
@@ -287,8 +272,8 @@ if parcels_id:
                 "spatial_query_point",
                 {
                     "item_id": parcels_id,
-                    "address": "455 Main St",  # Worcester City Hall
-                    "out_fields": "MAP_PAR_ID,POLY_TYPE",
+                    "address": "202 C St, San Diego, CA",
+                    "out_fields": "apn,situs_address,situs_street",
                     "limit": 2,
                 },
             )
@@ -300,8 +285,8 @@ if parcels_id:
 
 # 14. get_aggregations sanity
 try:
-    t = text_of(call_tool("get_aggregations", {"field": "type"}))
-    check("get_aggregations(type)", "Feature Service" in t, t.replace("\n", " ")[:60])
+    t = text_of(call_tool("get_aggregations", {"field": "type", "q": "parcels"}))
+    check("get_aggregations(type)", "dataset(s)" in t, t.replace("\n", " ")[:60])
 except Exception as e:
     check("get_aggregations(type)", False, repr(e))
 
