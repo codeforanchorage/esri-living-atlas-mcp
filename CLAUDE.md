@@ -2,19 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**San Diego fork.** This is a San Diego fork of the OpenContext MCP server framework ("San Diego GIS MCP"). It serves SANDAG/SanGIS regional GIS data from SANDAG's ArcGIS Enterprise portal (`geo.sandag.org`) via the built-in `arcgis` plugin (see `config.yaml`). It was adapted from the Worcester, MA fork, which targeted an ArcGIS Hub site.
+**Living Atlas fork.** This is the ESRI Living Atlas fork of the OpenContext MCP server framework ("ESRI Living Atlas MCP"). It serves ArcGIS Living Atlas of the World — Esri's curated catalog on ArcGIS Online (`www.arcgis.com`) — via the built-in `living_atlas` plugin (see `config.yaml`). It was adapted from the San Diego regional fork, whose `arcgis` plugin (ArcGIS Enterprise) remains in the tree, disabled, as the machinery it was forked from.
 
-## Data source: SANDAG/SanGIS ArcGIS Enterprise
+## Data source: ArcGIS Online / Living Atlas group
 
-Facts verified against the live services (keep these in mind when touching discovery or query code):
+Facts verified empirically against the live API (full detail + raw captures in `docs/CATALOG_NOTES.md` and `capture/raw_curl.txt` — read those before touching discovery or scoping code):
 
-- **Services directory:** `https://geo.sandag.org/server/rest/services` — a standard ArcGIS Enterprise services directory. Directory-walking with `?f=json` works anonymously; the `Hosted/` folder is public (Library, Floodplain, parcels, etc.).
-- **Auth-gated folders:** some folders (e.g. `GeoDepot`) require sign-in. Discovery must skip them and handle 401/403/sign-in responses gracefully rather than failing the walk.
-- **Catalog search:** try `https://geo.sandag.org/portal/sharing/rest/search` anonymously first (same API shape as an ArcGIS Online org search). If it is open, use it; if not, fall back to walking the services directory.
-- **Feature queries:** standard `/FeatureServer/<N>/query`. `MaxRecordCount` is 2000 — paginate with `resultOffset`.
-- **Spatial reference:** layers are stored in EPSG:2230 (CA State Plane Zone VI, US feet). Always request `outSR=4326` on queries, and declare `inSR=4326` on point/geometry inputs.
-- **Attribution:** pass each service's `copyrightText` through in tool responses (SanGIS attribution), and link SANDAG's GIS Data Disclaimer in the README.
-- **Geocoder (optional):** `SANDAG_COMPOSITE_LOCATOR` GeocodeServer at `https://gis.sandag.org/sdgis/rest/services` (`findAddressCandidates`).
+- **The Living Atlas filter is a group membership:** group `47dd57c9a59d458c86d3d6b978560088` on www.arcgis.com. All catalog queries use the group content search (`/sharing/rest/content/groups/<id>/search`) — the only endpoint that honors the Living Atlas `categories` taxonomy. Do NOT scope by `owner:esri*` or `contentstatus:public_authoritative` (both are wrong).
+- **`categories` semantics:** one param holding a JSON array = OR; the param repeated = AND. Category paths prefix-match. The taxonomy lives in category-set item `1ad6b64fe4e1428a8f182dd6010fc2c9` (`/data`), not in the group's `categorySchema` (which only delegates).
+- **Type filters go inside `q`:** `q=(wildfire) (type: "Deep Learning Package")`.
+- **Premium markers:** `typeKeywords` containing `Requires Subscription` (or `Requires Credits`). Service-level token demands surface as HTTP 401/403 or in-body ArcGIS error codes 498/499 — always map these to the clean subscriber-content message, never a raw error. No tokens, ever; premium access is permanently out of scope.
+- **Membership enforcement:** query tools accept only Living Atlas item IDs, and `get_dataset` verifies group membership (`q=id:<id>` against the group) before resolving any service URL. This is deliberate anti-laundering — don't add service-URL parameters to tools.
+- **Live catalog, no snapshot:** ~10,800 items, updated continuously. Caching TTLs: search ~10 min, item metadata/schemas/taxonomy ~1 h. Single retry with 0.5s backoff; timeouts and outages must produce honest "upstream unavailable / not an empty result" errors.
+- **Feature queries:** standard `/FeatureServer/<N>/query`, paginate with `resultOffset`. Beware layer-specific pathology: some huge national layers (e.g. USA Structures `0ec8512a…`) reject ALL spatial queries server-side after ~55s.
+- **Spatial reference:** WGS84 in/out everywhere (`inSR=4326`, `outSR=4326`).
+- **Attribution:** pass each item's `accessInformation` (credits) through in tool responses; providers include federal agencies and NGOs, not just Esri.
 
 ## Build & Development Commands
 
@@ -71,7 +73,7 @@ Claude (stdio) → Go client (client/) or stdio_bridge.py → HTTP POST /mcp
 - `server/http_handler.py` — Cloud-agnostic HTTP handler shared by Lambda and local server
 - `stdio_bridge.py` — Python stdio-to-HTTP bridge for connecting Claude Desktop/Code to the local server (alternative to Go client)
 
-**Built-in plugins** (`plugins/`): `ckan`, `arcgis`, `socrata` — each implements `DataPlugin` with `search_datasets`, `get_dataset`, `query_data`. Custom plugins go in `custom_plugins/` and are auto-discovered.
+**Built-in plugins** (`plugins/`): `ckan`, `arcgis`, `socrata`, `living_atlas` — each implements `DataPlugin` with `search_datasets`, `get_dataset`, `query_data`. This fork enables `living_atlas` (which reuses `plugins/arcgis/where_validator.py` for WHERE/out_fields/order_by hardening). Custom plugins go in `custom_plugins/` and are auto-discovered.
 
 ## Plugin Development
 

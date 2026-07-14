@@ -52,6 +52,22 @@ plugins:
     timeout: 120
     # token: "${ARCGIS_TOKEN}"  # Optional: Bearer token for private items
 
+  # Built-in: ArcGIS Living Atlas of the World (www.arcgis.com)
+  # Read-only, anonymous discovery + query over Esri's curated catalog.
+  # The defaults (group_id, category_set_item_id) are the empirically
+  # verified Living Atlas scoping -- see docs/CATALOG_NOTES.md before
+  # changing them. No token option on purpose: premium content is out of
+  # scope for this server.
+  living_atlas:
+    enabled: false # Set to true to use
+    portal_url: "https://www.arcgis.com"
+    group_id: "47dd57c9a59d458c86d3d6b978560088"
+    category_set_item_id: "1ad6b64fe4e1428a8f182dd6010fc2c9"
+    timeout: 25 # keep under API Gateway's 29s response cap
+    search_cache_ttl: 600 # seconds; catalog updates continuously
+    metadata_cache_ttl: 3600 # seconds; item metadata / schemas / taxonomy
+    max_query_records: 500 # server-side cap; many LA layers are global
+
   # yamllint disable rule:comments-indentation
   # Custom: Add your own plugins here
   # Example:

@@ -1,21 +1,21 @@
 # OpenContext Configuration
 # ==========================
 #
-# San Diego GIS MCP — derived from config-example.yaml.
+# ESRI Living Atlas MCP — derived from config-example.yaml.
 #
 # IMPORTANT: Enable ONLY ONE plugin per fork/deployment (One Fork = One MCP Server).
 # See docs/ARCHITECTURE.md for details.
 
 ---
 # Server metadata
-server_name: "San Diego Regional GIS MCP"
+server_name: "ESRI Living Atlas MCP"
 description: >-
-  San Diego REGIONAL GIS MCP server - safe, conversational access to the
-  SANDAG-hosted regional / SanGIS catalog (geo.sandag.org): parcels,
-  floodplain, address points, regional transportation and land use.
-  Authoritative City of San Diego municipal layers (MHPA, City base zoning,
-  community-plan land use) live on the separate "San Diego City" server.
-organization: "SANDAG/SanGIS"
+  Discovery + query surface over ArcGIS Living Atlas of the World -- Esri's
+  curated catalog of authoritative geographic content (feature layers,
+  imagery, boundaries, demographics, environment, live feeds, and 100+
+  pretrained GeoAI models). Unofficial community on-ramp using the public
+  sharing REST API; read-only, anonymous, premium content out of scope.
+organization: "Code for Anchorage"
 
 # Plugin configuration
 # ====================
@@ -24,41 +24,36 @@ organization: "SANDAG/SanGIS"
 # For additional MCP servers, fork this repository again
 #
 plugins:
-  # Built-in: CKAN (for CKAN-based open data portals)
-  ckan:
-    enabled: false # Set to true to use
-    base_url: "https://data.example.gov/" # CKAN API base URL
-    portal_url: "https://data.example.gov/" # Public portal URL
-    city_name: "Your City" # City/organization name
-    timeout: 120 # HTTP timeout in seconds
-    # api_key: "${CKAN_API_KEY}"  # Optional: CKAN API key for authenticated requests
-
-  # Built-in: ArcGIS Enterprise portal
-  # SANDAG/SanGIS regional GIS: portal search for discovery, with the
-  # services directory as fallback; layers stored in EPSG:2230 (queries
-  # pin outSR=4326).
-  arcgis:
-    enabled: true # Set to true to use
-    portal_url: "https://geo.sandag.org/portal"
-    services_url: "https://geo.sandag.org/server/rest/services"
-    geocoder_url: "https://gis.sandag.org/sdgis/rest/services/SANDAG_COMPOSITE_LOCATOR/GeocodeServer"
-    city_name: "the San Diego region"
-    scope_note: >-
-      This is the SANDAG/SanGIS REGIONAL catalog. Authoritative City of San
-      Diego municipal layers (MHPA, City base zoning, community-plan land
-      use) are NOT here -- they live on the separate 'San Diego City' MCP
-      server; use that server for City municipal questions.
+  # Built-in: ArcGIS Living Atlas of the World (www.arcgis.com)
+  # The group_id scopes every catalog query to the Living Atlas curation
+  # group; the category_set_item_id holds the category taxonomy. Both were
+  # determined empirically from the official browse app -- see
+  # docs/CATALOG_NOTES.md before changing them.
+  living_atlas:
+    enabled: true
+    portal_url: "https://www.arcgis.com"
+    group_id: "47dd57c9a59d458c86d3d6b978560088"
+    category_set_item_id: "1ad6b64fe4e1428a8f182dd6010fc2c9"
     # 25s, not 120: API Gateway hard-caps responses at 29s, so an upstream
     # timeout must fire BEFORE that to reach the client as a clean JSON-RPC
-    # error instead of an opaque 504. Normal SANDAG queries finish in <5s.
+    # error instead of an opaque 504. Normal AGO queries finish in <5s.
     timeout: 25
-    geocoder_region: "San Diego, CA" # biases the US Census fallback geocoder
-    # token: "${ARCGIS_TOKEN}"  # Optional: Bearer token for private items
+    search_cache_ttl: 600 # ~10 min: the catalog updates continuously
+    metadata_cache_ttl: 3600 # ~1 h: item metadata / schemas / taxonomy
+    max_query_records: 500 # server-side cap; many LA layers are global
+
+  # Built-in: ArcGIS Enterprise portal (kept for reference; disabled)
+  arcgis:
+    enabled: false
+    portal_url: "https://geo.sandag.org/portal"
+    services_url: "https://geo.sandag.org/server/rest/services"
+    city_name: "the San Diego region"
+    timeout: 25
 
 # AWS deployment settings
 aws:
   region: "us-west-2" # AWS region for Lambda
-  lambda_name: "sandiego-gis-mcp" # Lambda function name
+  lambda_name: "living-atlas-mcp" # Lambda function name
   lambda_memory: 512 # Lambda memory in MB (128-10240)
   lambda_timeout: 120 # Lambda timeout in seconds (max 900)
 

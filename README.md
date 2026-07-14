@@ -10,229 +10,78 @@
 
 ---
 
-**San Diego Regional GIS MCP** — a San Diego fork of OpenContext. It serves the **SANDAG-hosted regional / SanGIS catalog** from SANDAG's ArcGIS Enterprise portal ([geo.sandag.org](https://geo.sandag.org/portal/home/)) through the built-in `arcgis` plugin: parcels, floodplains, address points, transit, regional land use, and hundreds of other regional layers.
+**ESRI Living Atlas MCP** — an OpenContext fork that gives AI agents a discovery + query surface over [ArcGIS Living Atlas of the World](https://livingatlas.arcgis.com/), Esri's curated catalog of authoritative geographic content: feature layers, imagery, boundaries, demographics, environment, live feeds (wildfires, earthquakes, weather), and 100+ pretrained GeoAI models.
 
-## Scope: two San Diego servers
+## Provenance & scope
 
-San Diego coverage is split across two MCP servers. **This server is the regional one.**
+**Living Atlas** is a *curated catalog*, not a single data producer: items are published by Esri teams, federal agencies (FEMA, USDA Forest Service, Census), national mapping agencies, and NGOs, and curated into the Living Atlas by Esri. Membership in the catalog is an ArcGIS Online group membership; this server scopes every query to that group — the same filter the official browse app uses (verified empirically; see [docs/CATALOG_NOTES.md](docs/CATALOG_NOTES.md)).
 
-| Server | Backing data | Owns |
-| ------ | ------------ | ---- |
-| **San Diego Regional GIS** (this repo) | SANDAG/SanGIS ArcGIS Enterprise — `geo.sandag.org` | Regional/county-wide layers: parcels, floodplain (FEMA NFHL), address points, roads, transit, regional land use & demographics |
-| **San Diego City** (separate server) | City of San Diego ArcGIS Server — `webmaps.sandiego.gov` | Authoritative City municipal layers: MHPA, City base zoning, community-plan land use |
+**This server is an unofficial community on-ramp** built by Code for Anchorage using ArcGIS Online's public sharing REST API. It is not affiliated with or endorsed by Esri. It is read-only and fully anonymous: it holds no ArcGIS credentials, and **premium/subscriber content is intentionally out of scope** — subscriber items are flagged honestly in search results, and query attempts against them return a clear one-line explanation rather than a raw error. Every tool response passes through the item's credits (`accessInformation`); cite those providers — not "Esri" generically — when reporting the data.
 
-If a question needs an authoritative **City of San Diego municipal** layer (MHPA boundaries, City base zones, community-plan land use), route it to the **San Diego City** server — this catalog does not hold those layers. The `search_datasets` tool description carries the same routing hint so models pick the right server on their own.
-
-> **Data disclaimer & attribution.** This server passes each layer's SanGIS/SANDAG attribution through in tool responses. Before using the data, review the SANDAG GIS Data Disclaimer (see SANDAG's [Geographic Information Systems page](https://www.sandag.org/data-and-research/geographic-information-systems)), the [SanGIS Legal Notice](https://gis.sangis.org/sanportal/apps/storymaps/stories/d26146d84e834ff6bcd58e4e620a983a), and the [SANDAG Open Data Terms of Use](https://opendata.sandag.org/stories/s/Data-Terms-of-Use/gt4z-srr7/).
-
----
-
-## How it works
-
-Discovery searches SANDAG's portal catalog anonymously (`geo.sandag.org/portal/sharing/rest/search`); if portal search is ever closed off, the plugin automatically falls back to walking the ArcGIS Server services directory (`geo.sandag.org/server/rest/services`), skipping auth-gated folders such as `GeoDepot`.
-
-**Coordinate contract: WGS84 in, WGS84 out.** SANDAG stores its layers in EPSG:2230 (CA State Plane Zone VI, US feet), but that never leaks to callers: every `/query` request pins `outSR=4326`, every point/geometry input is declared as `inSR=4326`, and the geocoder returns `outSR=4326` — so all coordinates in and out of every tool are plain WGS84 lon/lat (EPSG:4326). This matches the sibling **San Diego City** server, so results from the two servers compose without reprojection.
+Unlike the static-snapshot fleet servers, the catalog here is live and enormous (~10,800 items, updated continuously), so the server queries ArcGIS Online at runtime with light caching (search ~10 min, metadata ~1 h), a single polite retry, and honest "upstream unavailable" errors instead of silently empty results.
 
 ### Tools exposed
 
 | Tool | Purpose |
 | ---- | ------- |
-| `arcgis__search_datasets` | Discover datasets by keyword (e.g. "parcels", "floodplain"). Supports a `type` filter — see below. |
-| `arcgis__get_dataset` | Fetch a dataset's metadata, service URL, and SanGIS attribution |
-| `arcgis__get_layer_schema` | List a dataset's fields (name, type, alias, coded values), optionally filtered by `keyword` |
-| `arcgis__get_distinct_values` | List the distinct values in a field (with optional `like` / `where`) to confirm exact codes |
-| `arcgis__query_data` | Query features from a dataset (supports `where`, `out_fields`, `order_by`, `limit`). Output leads with a `TOTAL MATCHING` count, so "how many X?" needs no paging. Pages with `resultOffset` when a layer's `MaxRecordCount` truncates a response. |
-| `arcgis__spatial_query_point` | Point-in-polygon: which polygon(s) contain a given point — by `lon`/`lat` **or** a street `address` |
-| `arcgis__geocode_address` | Convert a street address to `lon`/`lat` via the SANDAG composite locator (`SANDAG_COMPOSITE_LOCATOR` GeocodeServer) |
-| `arcgis__get_aggregations` | Facet counts across the catalog (e.g. by `type`, `tags`, `owner`), tallied over the top matching items |
+| `living_atlas__search_living_atlas` | Search the catalog by keyword, with optional `item_type` (e.g. `Feature Layer`, `Imagery Layer`, `Deep Learning Package`), `category`, and `region` filters. Compact rows with access flags (public / subscriber / premium). |
+| `living_atlas__get_item` | Full item metadata: description, credits, license, Living Atlas categories, service URL, layer list |
+| `living_atlas__list_categories` | The Living Atlas category taxonomy (thematic tree + region codes) — exact spellings for the search filters |
+| `living_atlas__get_layer_schema` | A layer's fields (name, type, alias, coded values), so WHERE clauses aren't guessed |
+| `living_atlas__get_distinct_values` | Distinct values in a field (with optional `like` / `where`) to confirm exact codes |
+| `living_atlas__query_data` | Query records from a Feature/Map Service layer: `where`, `out_fields`, `order_by`, WGS84 `bbox`, with a leading `TOTAL MATCHING` count and server-side result caps |
+| `living_atlas__spatial_query_point` | Point-in-polygon: which features contain a WGS84 lon/lat — flood zones, census tracts, land cover, etc. |
 
-### Finding queryable data: `type` filter
+All tool IDs are Living Atlas **item IDs** (32-char hex, from search). Arbitrary ArcGIS service URLs are deliberately not accepted — the server verifies group membership before resolving any service, so it cannot be used as a proxy for non-Living-Atlas content.
 
-The portal catalog mixes queryable Feature Services with service definitions, web maps, and apps. `search_datasets` takes an optional **`type`** argument that restricts results to a single ArcGIS item type — pass `type: "Feature Service"` to see only data you can query or map.
-
-`search_datasets` arguments:
-
-| Arg | Required | Description |
-| --- | -------- | ----------- |
-| `q` | yes | Full-text search query (single keywords match best; multi-word queries fall back to the most distinctive word if the phrase finds nothing) |
-| `type` | no | Restrict to one item type. Use `"Feature Service"` for queryable data; other values: `"Map Service"`, `"Web Map"`, `"Web Mapping Application"` |
-| `limit` | no | Max results, 1–100 (default 10) |
-
-For example, `q: "parcels"` alone returns 137 items of mixed types; with `type: "Feature Service"` it returns the 63 queryable layers.
-
-### Dataset IDs
-
-Portal discovery returns 32-char hex item IDs (e.g. the SanGIS **Parcels** layer). When running in directory-fallback mode, IDs are service paths instead (e.g. `Hosted/Parcels/FeatureServer`). Both forms are accepted by every tool that takes a dataset/item ID.
-
-### Writing correct queries: schema → distinct values → query
-
-ArcGIS field names are **case-sensitive** — and SANDAG's hosted layers use lowercase field names (`apn`, `situs_address`, …). Rather than guess, use the discovery tools first:
-
-1. **`get_layer_schema`** — see the real field names and types. `keyword` narrows a wide schema:
-   ```jsonc
-   { "item_id": "<parcels-id>", "keyword": "situs" }   // -> situs_address, situs_street, situs_zip, ...
-   ```
-2. **`get_distinct_values`** — confirm the exact value to filter on:
-   ```jsonc
-   { "item_id": "<parcels-id>", "field": "situs_community" }
-   ```
-3. **`query_data`** — now write the `where` clause with verified names and values.
-
-### Spatial lookup: `spatial_query_point` (by address or coordinates)
-
-"Which polygon contains this location?" — against a polygon Feature Service (parcels, floodplains, districts, …). Pass **either a street `address`** (geocoded automatically via the SANDAG composite locator) **or** a WGS84 `lon`/`lat` (longitude first):
-
-```jsonc
-// arcgis__spatial_query_point — by address (202 C St = San Diego City Administration Building)
-{ "item_id": "<parcels-id>", "address": "202 C St, San Diego, CA",
-  "out_fields": "apn,situs_address,situs_street" }
-
-// ...or by coordinates
-{ "item_id": "<parcels-id>", "lon": -117.1626, "lat": 32.7170 }
-```
-
-Returns the attributes of every polygon containing the point (no geometry); when an address is used, the matched address is shown. You can also geocode on its own with `geocode_address`.
-
----
+**Coordinate contract: WGS84 in, WGS84 out** (`inSR=4326` declared, `outSR=4326` requested), matching the rest of the fleet so results compose without reprojection.
 
 ## Try asking
 
-Once the connector is added, just ask Claude in plain English — it picks the right tools:
-
-**Discovery**
-- "What GIS layers does SANDAG publish about flooding?" *(type-filtered discovery)*
-- "Break down the regional GIS catalog by type." *(aggregations)*
-
-**Counts & records**
-- "How many parcels are in the 92101 ZIP code?" *(answered from `TOTAL MATCHING`, no paging)*
-- "What communities appear in the parcels layer?" *(`get_distinct_values`)*
-
-**Schema**
-- "What fields does the parcels layer have?" *(`get_layer_schema`)*
-
-**Spatial**
-- "Which parcel is San Diego City Hall (202 C St) on?" *(address geocoded automatically, then point-in-polygon)*
-- "What flood zone is at latitude 32.717, longitude -117.163?" *(coordinates also work)*
-
----
+- "Find authoritative current wildfire perimeter data — who maintains it and how often is it updated?"
+- "What pretrained GeoAI models exist for tree canopy or land cover?"
+- "What's the FEMA flood zone situation at 61.2176, -149.8936?"
+- "What Living Atlas demographics layers cover Alaska?" *(category + region filters)*
+- "List the Living Atlas category taxonomy." *(`list_categories`)*
 
 ## Run locally
 
-`config.yaml` is already committed for San Diego (the `arcgis` plugin pointed at `geo.sandag.org`), so no setup is needed to run the server locally:
-
 ```bash
-pip install aiohttp pyyaml
-python3 scripts/local_server.py      # serves http://localhost:8000/mcp
+pip install -r requirements.txt        # or: uv sync
+python scripts/local_server.py         # serves http://localhost:8000/mcp
 ```
 
-On startup it connects to the live portal and registers the eight `arcgis__*` tools. SANDAG's portal search and Hosted services are public, so **no API token is required**. (On a Windows console you may need `PYTHONUTF8=1` for the startup banner's emoji.)
-
-Verify the upstream endpoints directly (services directory, portal search, a live parcel query, and a geocode) with:
+`config.yaml` ships pre-configured (the `living_atlas` plugin is the only one enabled). Validate with:
 
 ```bash
-python3 scripts/smoke_sandag_live.py
+python -c "from core.validators import load_and_validate_config; load_and_validate_config('config.yaml')"
 ```
 
-And smoke-test a running deployment end-to-end (defaults to `http://localhost:8000/mcp`):
+Live smoke test against the real catalog (network required):
 
 ```bash
-python3 scripts/smoke_prod.py http://localhost:8000/mcp
+python scripts/smoke_living_atlas_live.py
 ```
 
-See [Getting Started](docs/GETTING_STARTED.md) for the generic OpenContext setup.
+Connect Claude Desktop/Code through `stdio_bridge.py` or the Go client in `client/` — see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
-## Connect to Claude
+## Deploy
 
-The server is live. Add it as a custom connector in Claude (same steps on Claude.ai and Claude Desktop):
-
-1. **Settings → Connectors** (or **Customize → Connectors** on claude.ai)
-2. **Add custom connector**
-3. Name it e.g. `San Diego GIS` and paste the URL:
-
-   ```
-   https://sandiego-regional-gis.codeforanchorage.org/mcp
-   ```
-
-Quick health check from a terminal:
+Same Lambda + API Gateway pattern as the rest of the fleet, with cost controls on by default (reserved concurrency 10, API quota + throttle, WAF per-IP rate limit, CloudWatch spike alarms, 14/30-day log retention):
 
 ```bash
-curl -sS -X POST https://sandiego-regional-gis.codeforanchorage.org/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
-# → {"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}
+./scripts/deploy.sh --environment staging
+./scripts/deploy.sh --environment prod    # living-atlas.codeforanchorage.org
 ```
 
----
+The prod endpoint is `https://living-atlas.codeforanchorage.org/mcp`. DNS for `codeforanchorage.org` is managed externally (DreamHost): after the first prod apply, create the ACM validation CNAME and the CNAME to the API Gateway regional domain shown in the Terraform outputs.
 
-## Deploy & operate
+## Catalog scoping (for maintainers)
 
-Production runs on AWS Lambda + API Gateway behind `sandiego-regional-gis.codeforanchorage.org`, in `us-west-2`. DNS for `codeforanchorage.org` is managed externally at DreamHost: the ACM validation CNAME and the `sandiego-regional-gis` CNAME (→ `terraform output -raw custom_domain_target`) are created there.
+The Living Atlas filter, query grammar, `categories` AND/OR semantics, category taxonomy, and premium markers are documented in [docs/CATALOG_NOTES.md](docs/CATALOG_NOTES.md), with the raw captured requests in [capture/raw_curl.txt](capture/raw_curl.txt). That file is the one future portal-catalog forks should read first.
 
-**First-time bootstrap** (state backend, once per account):
+## Explicitly out of scope
 
-```bash
-cd terraform/bootstrap
-terraform init
-terraform apply \
-  -var="aws_region=us-west-2" \
-  -var="state_bucket_name=<your-tfstate-bucket>" \
-  -var="lock_table_name=terraform-state-lock"
-```
-
-These values must match `terraform/aws/backend.tf`.
-
-**Deploy / redeploy:**
-
-```bash
-./scripts/deploy.sh --environment prod
-```
-
-For a code-only change, that single command is all you need. The first stand-up of a new environment also creates an ACM certificate and an API Gateway custom domain — DNS is managed externally (no Route53), so on the first deploy you must:
-
-1. **Validate the cert.** The first apply errors on `CreateDomainName` ("Certificate is not in an ISSUED state") — expected. Create the ACM validation CNAME (`terraform output acm_validation_cname_name`/`_value`), wait for `ISSUED`, then re-run the deploy.
-2. **Point the endpoint.** Create a CNAME for your domain → `terraform output -raw custom_domain_target`.
-
----
-
-## Documentation
-
-
-| Doc                                        | Description                                     |
-| ------------------------------------------ | ----------------------------------------------- |
-| [Getting Started](docs/GETTING_STARTED.md) | Setup and usage                                 |
-| [Architecture](docs/ARCHITECTURE.md)       | System design and plugins                       |
-| [Deployment](docs/DEPLOYMENT.md)           | AWS, Terraform, monitoring                      |
-| [Testing](docs/TESTING.md)                 | Local testing (Terminal, Claude, MCP Inspector) |
-
-
----
-
-## Examples
-
-- **Boston OpenData (CKAN):** [examples/boston-opendata/config.yaml](examples/boston-opendata/config.yaml)
-- **Custom plugin:** [examples/custom-plugin/](examples/custom-plugin/)
-
----
-
-## Contributing
-
-Pre-commit hooks (optional):
-
-```bash
-pip install pre-commit
-pre-commit install
-```
-
-Hooks: Ruff, yamllint, gofmt, plus `detect-private-key` and `gitleaks` secret scanning. Run manually: `pre-commit run --all-files`.
-
-> **Never commit secrets.** `config.yaml` is tracked, so any API token belongs in an environment variable referenced via `${ENV_VAR}` (e.g. `token: "${ARCGIS_TOKEN}"`), never inline. The gitleaks hook will block accidental commits of keys/tokens.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-**Author:** Srihari Raman, City of Boston Department of Innovation and Technology
-
-**San Diego fork** adapted from the Worcester, MA fork of OpenContext. OpenContext is MIT-licensed; this fork retains the original attribution above. GIS data © SanGIS/SANDAG — see the disclaimer links at the top of this README.
+- Authenticated/premium content access (no tokens, ever)
+- Anything write-shaped — the server is read-only
+- Mirroring or bulk-downloading the catalog (search live, cache lightly)

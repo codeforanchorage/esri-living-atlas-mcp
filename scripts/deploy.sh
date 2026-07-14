@@ -27,7 +27,7 @@ show_usage() {
     echo ""
     echo "Options:"
     echo "  --environment, -e   Deployment environment: staging or prod (required)"
-    echo "  --tfworkspace, -w   Terraform workspace name (default: sandiego-staging or sandiego-prod)"
+    echo "  --tfworkspace, -w   Terraform workspace name (default: living-atlas-staging or living-atlas-prod)"
     echo "  --help, -h          Show this help message"
 }
 
@@ -68,9 +68,9 @@ fi
 # Default workspace per environment when not explicitly provided
 if [ -z "$TF_WORKSPACE" ]; then
     if [ "$ENVIRONMENT" = "prod" ]; then
-        TF_WORKSPACE="sandiego-prod"
+        TF_WORKSPACE="living-atlas-prod"
     else
-        TF_WORKSPACE="sandiego-staging"
+        TF_WORKSPACE="living-atlas-staging"
     fi
 fi
 

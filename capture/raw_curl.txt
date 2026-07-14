@@ -1,0 +1,46 @@
+# Living Atlas browse app — captured API requests
+#
+# Captured 2026-07-13 from https://livingatlas.arcgis.com/en/browse/ using
+# Chrome network capture (Claude-in-Chrome), by loading the page, searching
+# "wildfire", toggling category Environment > Land Cover, and setting the
+# content-type filter to Deep Learning Package. Thumbnail/oauth noise omitted.
+#
+# Finding: the official browse UI scopes ALL catalog queries to the group
+# content-search endpoint for group 47dd57c9a59d458c86d3d6b978560088
+# ("ArcGIS Living Atlas of the World" curation group on www.arcgis.com).
+
+# 1) Initial page load — category facet counts (num=0, countFields=type),
+#    categories=/Categories is the taxonomy root (i.e. "no category filter")
+curl 'https://www.arcgis.com/sharing/rest/content/groups/47dd57c9a59d458c86d3d6b978560088/search?f=json&start=1&num=0&categories=%2FCategories&countFields=type&countSize=200'
+
+# 2) Initial page load — first result page, no query
+curl 'https://www.arcgis.com/sharing/rest/content/groups/47dd57c9a59d458c86d3d6b978560088/search?f=json&start=1&num=10&categories=%2FCategories'
+
+# 3) Search-as-you-type suggestions — NOTE: this one uses the GLOBAL search
+#    endpoint with a group: filter, proving both scoping forms are equivalent
+curl 'https://www.arcgis.com/sharing/rest/search/suggest?f=json&suggest=wildfire&filter=group%3A47dd57c9a59d458c86d3d6b978560088'
+
+# 4) Search "wildfire" — main result page (q is parenthesized)
+curl 'https://www.arcgis.com/sharing/rest/content/groups/47dd57c9a59d458c86d3d6b978560088/search?f=json&start=1&num=10&q=%28wildfire%29&categories=%2FCategories'
+
+# 5) Search "wildfire" — title-boost companion request the UI merges in
+curl 'https://www.arcgis.com/sharing/rest/content/groups/47dd57c9a59d458c86d3d6b978560088/search?f=json&start=1&num=30&q=%28title%3Awildfire%29&categories=%2FCategories'
+
+# 6) Category toggled: Environment > Land Cover — categories param becomes a
+#    JSON array of full category paths
+curl 'https://www.arcgis.com/sharing/rest/content/groups/47dd57c9a59d458c86d3d6b978560088/search?f=json&start=1&num=10&q=%28wildfire%29&categories=%5B%22%2FCategories%2FEnvironment%2FLand+Cover%22%5D'
+
+# 7) Content type set to Deep Learning Package — type filter is appended
+#    INTO q, not a separate param: q=(wildfire) (type: "Deep Learning Package")
+curl 'https://www.arcgis.com/sharing/rest/content/groups/47dd57c9a59d458c86d3d6b978560088/search?f=json&start=1&num=10&q=%28wildfire%29+%28type%3A+%22Deep+Learning+Package%22%29&categories=%5B%22%2FCategories%2FEnvironment%2FLand+Cover%22%5D'
+
+# Content-type dropdown values observed in the UI:
+#   All content types | Maps | Layers | Scenes | Apps/Story Maps | Tools |
+#   Deep Learning Package | Styles
+# Top-level category tabs observed:
+#   Trending | Basemaps | Imagery | Boundaries | People | Infrastructure |
+#   Environment
+# Environment subcategories observed:
+#   Earth Observations, Oceans, Elevation and Bathymetry, Weather and
+#   Climate, Land Cover, Energy Resources, Soils and Geology, Fresh Water,
+#   Habitat, Species
