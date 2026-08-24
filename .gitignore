@@ -233,3 +233,8 @@ examples/
 
 # Claude Code local settings
 .claude/
+
+# Saved Terraform plans (binary, may embed resource detail)
+terraform/*/tfplan
+**/*.tfplan
+tfplan
