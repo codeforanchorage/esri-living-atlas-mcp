@@ -321,12 +321,148 @@ try:
     check("transport: supported version header -> 200", status == 200, f"{status}")
     status, body = raw_post({"jsonrpc": "2.0", "method": "notifications/initialized"})
     check(
-        "transport: notification -> accepted, empty body",
-        status in (200, 202) and not body,
+        "transport: notification -> 202, empty body",
+        status == 202 and not body,
         f"status={status}",
     )
 except Exception as e:
     check("transport hygiene", False, repr(e))
+
+
+# -- modern era (MCP 2026-07-28, stateless, per-request _meta) ------------
+# Everything above rides the legacy initialize handshake. claude.ai and
+# Claude Code open with this era instead, so a regression here is invisible
+# to the legacy checks yet breaks every real session.
+
+MODERN = "2026-07-28"
+MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": MODERN,
+    "io.modelcontextprotocol/clientInfo": {"name": "smoke", "version": "1.0"},
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
+def modern(method, params=None, rid=None, name=None, version=MODERN):
+    global _id
+    _id += 1
+    params = dict(params or {})
+    params["_meta"] = {**MODERN_META, "io.modelcontextprotocol/protocolVersion": version}
+    headers = {"MCP-Protocol-Version": version, "Mcp-Method": method}
+    if name:
+        headers["Mcp-Name"] = name
+    return raw_post(
+        {"jsonrpc": "2.0", "id": rid if rid is not None else _id,
+         "method": method, "params": params},
+        headers,
+    )
+
+
+# 20. server/discover: the modern replacement for initialize
+try:
+    status, r = modern("server/discover")
+    res = r.get("result", {})
+    ok = (
+        status == 200
+        and res.get("supportedVersions", [None])[0] == MODERN
+        and "2025-03-26" in res.get("supportedVersions", [])
+        and res.get("resultType") == "complete"
+        and res.get("cacheScope") == "public"
+        and isinstance(res.get("ttlMs"), int)
+        and res.get("_meta", {}).get("io.modelcontextprotocol/serverInfo", {}).get("name")
+        == SERVER_NAME
+        and bool(res.get("instructions"))
+    )
+    check("modern: server/discover", ok,
+          f"status={status} versions={res.get('supportedVersions')}")
+except Exception as e:
+    check("modern: server/discover", False, repr(e))
+
+# 21. tools/list carries the CacheableResult hints and resultType
+try:
+    status, r = modern("tools/list")
+    res = r.get("result", {})
+    names = [t["name"] for t in res.get("tools", [])]
+    ok = (
+        status == 200
+        and len(names) == N_TOOLS
+        and res.get("resultType") == "complete"
+        and res.get("ttlMs") == 300_000
+        and res.get("cacheScope") == "public"
+        and all("title" in t and "annotations" in t for t in res.get("tools", []))
+    )
+    check("modern: tools/list cache hints + titles", ok,
+          f"status={status} n={len(names)} ttlMs={res.get('ttlMs')}")
+    # Deterministic order (spec SHOULD): a second listing must match.
+    status2, r2 = modern("tools/list")
+    names2 = [t["name"] for t in r2.get("result", {}).get("tools", [])]
+    check("modern: tools/list order is deterministic", names == names2,
+          "identical" if names == names2 else "order differs between calls")
+except Exception as e:
+    check("modern: tools/list cache hints + titles", False, repr(e))
+
+# 22. tools/call with mirrored Mcp-Name header; result stamped resultType
+try:
+    tool = f"{TOOL_PREFIX}list_categories"
+    status, r = modern("tools/call", {"name": tool, "arguments": {}}, name=tool)
+    res = r.get("result", {})
+    ok = (
+        status == 200
+        and res.get("resultType") == "complete"
+        and not res.get("isError")
+        and "Land Cover" in res["content"][0]["text"]
+        and "io.modelcontextprotocol/serverInfo" in res.get("_meta", {})
+    )
+    check("modern: tools/call list_categories", ok, f"status={status}")
+except Exception as e:
+    check("modern: tools/call list_categories", False, repr(e))
+
+# 23. ping is gone in this era: 404 + -32601, not a silent {}
+try:
+    status, r = modern("ping")
+    ok = status == 404 and r["error"]["code"] == -32601
+    check("modern: ping -> 404/-32601", ok, f"status={status} body={json.dumps(r)[:80]}")
+except Exception as e:
+    check("modern: ping -> 404/-32601", False, repr(e))
+
+# 24. unsupported version -> 400 / -32022 listing what we serve, id echoed
+try:
+    status, r = modern("tools/list", rid=4242, version="2099-01-01")
+    err = r.get("error", {})
+    ok = (
+        status == 400
+        and err.get("code") == -32022
+        and err.get("data", {}).get("requested") == "2099-01-01"
+        and MODERN in err.get("data", {}).get("supported", [])
+        and r.get("id") == 4242
+    )
+    check("modern: unsupported version -> 400/-32022 (id echoed)", ok,
+          f"status={status} id={r.get('id')} code={err.get('code')}")
+except Exception as e:
+    check("modern: unsupported version -> 400/-32022 (id echoed)", False, repr(e))
+
+# 25. header/body disagreement -> 400 / -32020 HeaderMismatch
+try:
+    status, r = raw_post(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+         "params": {"_meta": MODERN_META}},
+        {"MCP-Protocol-Version": MODERN, "Mcp-Method": "ping"},
+    )
+    ok = status == 400 and r["error"]["code"] == -32020
+    check("modern: header mismatch -> 400/-32020", ok, f"status={status}")
+except Exception as e:
+    check("modern: header mismatch -> 400/-32020", False, repr(e))
+
+# 26. missing clientCapabilities -> malformed, 400 / -32602
+try:
+    status, r = raw_post(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+         "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": MODERN}}},
+        {"MCP-Protocol-Version": MODERN, "Mcp-Method": "tools/list"},
+    )
+    ok = status == 400 and r["error"]["code"] == -32602
+    check("modern: missing clientCapabilities -> 400/-32602", ok, f"status={status}")
+except Exception as e:
+    check("modern: missing clientCapabilities -> 400/-32602", False, repr(e))
 
 
 print("\n=== SUMMARY ===")

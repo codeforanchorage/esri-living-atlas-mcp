@@ -35,29 +35,32 @@ def _initialize(version=None, client=None):
 
 
 class TestProtocolNegotiation:
-    def test_supported_versions_newest_first_and_legacy_only(self):
-        assert MCPServer.SUPPORTED_PROTOCOL_VERSIONS == (
+    def test_supported_versions_are_dual_era_newest_first(self):
+        assert MCPServer.LEGACY_PROTOCOL_VERSIONS == (
             "2025-11-25",
             "2025-06-18",
             "2025-03-26",
             "2024-11-05",
         )
-        # 2026-07-28 drops the initialize handshake entirely; claiming it
-        # here would promise stateless semantics this tier does not serve.
-        assert "2026-07-28" not in MCPServer.SUPPORTED_PROTOCOL_VERSIONS
-        assert (
-            MCPServer.DEFAULT_PROTOCOL_VERSION in MCPServer.SUPPORTED_PROTOCOL_VERSIONS
+        assert MCPServer.MODERN_PROTOCOL_VERSIONS == ("2026-07-28",)
+        assert MCPServer.SUPPORTED_PROTOCOL_VERSIONS == (
+            MCPServer.MODERN_PROTOCOL_VERSIONS + MCPServer.LEGACY_PROTOCOL_VERSIONS
         )
+        # initialize IS the legacy handshake, so its default is legacy.
+        assert MCPServer.DEFAULT_PROTOCOL_VERSION in MCPServer.LEGACY_PROTOCOL_VERSIONS
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("version", MCPServer.SUPPORTED_PROTOCOL_VERSIONS)
-    async def test_recognised_version_is_echoed(self, version):
+    @pytest.mark.parametrize("version", MCPServer.LEGACY_PROTOCOL_VERSIONS)
+    async def test_recognised_legacy_version_is_echoed(self, version):
         response = await _server().handle_request(_initialize(version))
         assert response["result"]["protocolVersion"] == version
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("version", ["2026-07-28", "1999-01-01", None])
-    async def test_unrecognised_version_falls_back_to_default(self, version):
+    async def test_unrecognised_or_modern_version_falls_back_to_default(self, version):
+        """2026-07-28 IS supported, but never on initialize: it drops the
+        handshake, and echoing it here would promise stateless semantics
+        on a session-based exchange (see tests/test_modern_protocol.py)."""
         response = await _server().handle_request(_initialize(version))
         assert response["result"]["protocolVersion"] == "2025-03-26"
 

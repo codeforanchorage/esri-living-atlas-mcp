@@ -73,7 +73,7 @@ Claude (stdio) → Go client (client/) or stdio_bridge.py → HTTP POST /mcp
 **Key modules:**
 - `core/interfaces.py` — Abstract bases: `MCPPlugin`, `DataPlugin`, plus `ToolDefinition` (name / title / description / input_schema / output_schema / annotations), `ToolResult` (content + structured_content), the caller-error classes `ToolInputError`, `InvalidToolParamsError`, `UnknownToolError`, and the `PluginType` enum
 - `core/plugin_manager.py` — Discovers plugins by scanning `plugins/` and `custom_plugins/` for `plugin.py` files. Registers tools with `pluginname__toolname` prefix. Routes `tools/call` to the correct plugin.
-- `core/mcp_server.py` — Handles MCP JSON-RPC methods: `initialize`, `tools/list`, `tools/call`, `ping`. Negotiates the protocol version against `SUPPORTED_PROTOCOL_VERSIONS`, builds `serverInfo`/`instructions` from config, and maps caller errors (`MethodNotFoundError`, `InvalidToolParamsError`, `UnknownToolError`) to their JSON-RPC codes, logged at WARNING with no traceback.
+- `core/mcp_server.py` — Handles MCP JSON-RPC methods. Dual-era: legacy revisions (≤2025-11-25) get `initialize`, `tools/list`, `tools/call`, `ping` on a session; the modern revision (2026-07-28) is stateless — every request carries `_meta` (protocol version, client info/capabilities), `server/discover` replaces `initialize`, results carry `resultType` and cache hints, and the Streamable HTTP headers (`Mcp-Method`, `Mcp-Name`, `MCP-Protocol-Version`) must mirror the body or the request is a 400/-32020. Builds `serverInfo`/`instructions` from config and maps caller errors (`MethodNotFoundError`, `MalformedRequestError`, `UnsupportedProtocolVersionError`, `InvalidToolParamsError`, `UnknownToolError`) to their JSON-RPC codes and HTTP statuses, logged at WARNING with no traceback.
 - `core/validators.py` — Loads config from `config.yaml` (local) or `OPENCONTEXT_CONFIG` env var (Lambda). Enforces single-plugin rule.
 - `server/adapters/aws_lambda.py` — AWS Lambda entry point (handler: `server.adapters.aws_lambda.lambda_handler`). Also `server/lambda_handler.py` as legacy entry point.
 - `server/http_handler.py` — Cloud-agnostic HTTP handler shared by Lambda and local server. Enforces the Origin allowlist (403), validates `MCP-Protocol-Version` (400/-32022, `initialize` exempt), mints the per-session id, and adds CORS.
@@ -94,25 +94,45 @@ New plugins must implement `MCPPlugin` (or `DataPlugin` for data sources). Place
 These are contracts, not preferences — each is enforced by a test. If you change
 the behaviour, change the test deliberately rather than deleting it.
 
-- **Protocol negotiation** — supported revisions are a tuple in
-  `MCPServer.SUPPORTED_PROTOCOL_VERSIONS` (2025-11-25 … 2024-11-05, newest first).
-  `initialize` echoes the client's version when recognized, otherwise answers with
-  the default 2025-03-26. An absent `MCP-Protocol-Version` header means the
-  spec-defined 2025-03-26 and is NOT an error; an unsupported one is HTTP 400 with
-  `-32022` and the supported list, request id echoed (null for a notification or an
-  unparseable body). `initialize` itself is exempt from that header check, or a
-  client naming an unsupported revision could never reach the handshake that would
-  settle on a supported one. 2026-07-28 is deliberately NOT supported yet: it drops
-  the handshake for per-request `_meta` and is a dual-era migration, not a
-  version-string addition.
+- **Protocol negotiation is dual-era.** `MCPServer.SUPPORTED_PROTOCOL_VERSIONS` is
+  `MODERN_PROTOCOL_VERSIONS` (2026-07-28) + `LEGACY_PROTOCOL_VERSIONS`
+  (2025-11-25 … 2024-11-05), newest first. The era is picked per request
+  (`MCPServer.request_era`): `initialize` is legacy; a body whose `params._meta`
+  carries `io.modelcontextprotocol/protocolVersion` is modern; a modern
+  `MCP-Protocol-Version` header with no `_meta` is a malformed modern request, not a
+  legacy one to serve quietly. `initialize` negotiates ONLY legacy versions — echoes
+  the client's when recognized, else the default 2025-03-26 — so a client asking for
+  2026-07-28 on the handshake gets 2025-03-26. An absent `MCP-Protocol-Version`
+  header means the spec-defined 2025-03-26 and is NOT an error; a header naming a
+  version served in neither era is HTTP 400 with `-32022` and the supported list,
+  request id echoed (null for a notification or an unparseable body). `initialize`
+  itself is exempt from that header check, or a client naming an unsupported
+  revision could never reach the handshake that would settle on a supported one.
+- **Modern-era rules** (spec 2026-07-28, tested in `tests/test_modern_protocol.py`):
+  `_meta.protocolVersion` and `_meta.clientCapabilities` are required (`-32602`,
+  HTTP 400 when missing); a version not in `MODERN_PROTOCOL_VERSIONS` — including
+  our own legacy ones — is `-32022`/400; `server/discover`, `tools/list` and
+  `tools/call` are served, everything else (`ping`, `initialize`, `resources/*`)
+  is `-32601` on HTTP **404** (legacy keeps `-32601` inside a 200); every modern
+  result carries `resultType: "complete"` and `_meta` serverInfo, and
+  `server/discover` / `tools/list` carry `ttlMs` + `cacheScope`. `Mcp-Method`,
+  `MCP-Protocol-Version` and (for `tools/call`) `Mcp-Name` must be present and
+  mirror the body, `=?base64?…?=` sentinel included, else `-32020`/400. No
+  session is minted or echoed on a modern request. `_meta.traceparent` /
+  `tracestate` (strings only) are flattened onto the request log line as
+  `otel_traceparent` / `otel_tracestate`; `mcp_era`, `mcp_client_name`,
+  `mcp_client_version`, `mcp_protocol_version` are logged for BOTH eras. Legacy
+  clients must see no change at all.
 - **Server identity comes from config** — `serverInfo` is `server_name` /
   `server_version` and `instructions` is the `instructions` block, never a
   hardcoded "opencontext".
-- **Error codes** — `ping` returns `{}`. Unknown method is `-32601`. Unknown tool and
-  malformed `tools/call` (non-object `params`, missing `name`, non-object
-  `arguments`) are `-32602` and never reach a plugin; `arguments: null` means `{}`.
+- **Error codes** — `ping` returns `{}` (legacy). Unknown method is `-32601`. Unknown
+  tool and malformed `tools/call` (non-object `params`, missing `name`, non-object
+  `arguments`) are `-32602` on HTTP 200 in both eras — a bad tool argument is not a
+  malformed envelope — and never reach a plugin; `arguments: null` means `{}`.
   `-32603` + ERROR + traceback is reserved for genuine faults. A non-object JSON-RPC
-  body is `-32600` on HTTP 400; unparseable JSON is `-32700` on 400.
+  body is `-32600` on HTTP 400; unparseable JSON is `-32700` on 400. Accepted
+  notifications are HTTP 202 with an empty body.
 - **Caller errors never log a traceback.** Raise `ToolInputError` (a `ValueError`
   subclass) for anything the caller got wrong; the plugin logs it at WARNING.
   Numeric arguments go through `_int_arg` / `_float_arg` so a bad `limit` names the

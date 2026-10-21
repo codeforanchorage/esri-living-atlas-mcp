@@ -16,7 +16,7 @@ from core.logging_utils import (
     format_request_log,
     format_response_log,
 )
-from core.mcp_server import MCPServer
+from core.mcp_server import ERA_MODERN, MCPServer
 from core.plugin_manager import PluginManager
 from core.validators import (
     ConfigurationError,
@@ -351,8 +351,9 @@ class UniversalHTTPHandler:
         # Parse JSON once up front: to echo the JSON-RPC id on the
         # transport-level version error below (the spec's
         # UnsupportedProtocolVersionError example carries the request's id,
-        # and a client correlating in-flight requests needs it), and to
-        # detect initialize requests so a session ID can be minted.
+        # and a client correlating in-flight requests needs it), to detect
+        # initialize requests so a session ID can be minted, and to
+        # classify the era.
         # NOTE: This is intentionally parsing the JSON body separately from the
         # later parsing in _mcp_server.handle_http_request(), so a malformed
         # body still gets that method's -32700 handling. The body is small;
@@ -362,8 +363,10 @@ class UniversalHTTPHandler:
             request_json = json.loads(body)
             body_request_id = request_json.get("id")
             is_initialize = request_json.get("method") == "initialize"
+            is_modern = MCPServer.request_era(request_json, headers) == ERA_MODERN
         except (json.JSONDecodeError, AttributeError):
             is_initialize = False
+            is_modern = False
 
         # Validate the MCP-Protocol-Version header, which clients have been
         # required to send on every post-handshake request since 2025-06-18.
@@ -375,13 +378,13 @@ class UniversalHTTPHandler:
         # support -- it could never reach the handshake that would settle
         # on one we do.
         #
-        # An unrecognized value is refused with the 2026-07-28
-        # UnsupportedProtocolVersionError (-32022) listing what we DO
-        # serve, so the client can retry with one of those. The other
-        # forks used a bare -32600 here while they were legacy-only, to
-        # make dual-era clients fall back to initialize; that fallback is
-        # exactly what the dual-era core replaces, so there is no reason
-        # to start there.
+        # Both legacy (2025-11-25 and earlier, initialize handshake) and
+        # modern (2026-07-28+, per-request _meta) revisions pass through
+        # here -- see core/mcp_server.py for the split; the modern era's
+        # header/body consistency checks happen there, once the body has
+        # been parsed. A version served in NEITHER era is refused with the
+        # 2026-07-28 UnsupportedProtocolVersionError (-32022) listing what
+        # we do serve, so the client can retry with one of those.
         protocol_version = headers.get("mcp-protocol-version") if headers else None
         if (
             protocol_version is not None
@@ -431,7 +434,12 @@ class UniversalHTTPHandler:
                 extra={"request_id": request_id, "mcp_session_id": session_id},
             )
 
-        effective_session_id = session_id or incoming_session_id
+        # Modern-era (2026-07-28) requests have no session: an
+        # Mcp-Session-Id a client sends anyway is ignored, never echoed or
+        # logged as if it correlated anything.
+        effective_session_id = (
+            None if is_modern else (session_id or incoming_session_id)
+        )
 
         # Log request details
         request_log_data = format_request_log(

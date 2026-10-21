@@ -514,8 +514,9 @@ class TestHTTPRequestHandling:
 
         response = await server.handle_http_request(request_body)
 
-        assert response["statusCode"] == 200
-        assert response["body"] == ""  # Empty body for notifications
+        # Streamable HTTP: an accepted notification is 202 with no body.
+        assert response["statusCode"] == 202
+        assert response["body"] == ""
 
     @pytest.mark.asyncio
     async def test_handle_http_request_preserves_headers(self):
