@@ -146,9 +146,7 @@ class UniversalHTTPHandler:
         logger.info("UniversalHTTPHandler initialized")
 
     @classmethod
-    def _get_cors_headers(
-        cls, request_origin: Optional[str] = None
-    ) -> Dict[str, str]:
+    def _get_cors_headers(cls, request_origin: Optional[str] = None) -> Dict[str, str]:
         """Build CORS response headers, reflecting allowlisted origins.
 
         Args:
