@@ -197,10 +197,7 @@ class TestCORS:
             # No Origin sent → default-origin (claude.ai) is reflected.
             assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
             assert headers["Vary"] == "Origin"
-            assert (
-                headers["Access-Control-Allow-Methods"]
-                == "POST, OPTIONS"
-            )
+            assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
             assert (
                 headers["Access-Control-Allow-Headers"]
                 == "content-type, accept, mcp-session-id"
@@ -216,10 +213,7 @@ class TestCORS:
         # No Origin sent → default-origin reflected.
         assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
         assert headers["Vary"] == "Origin"
-        assert (
-            headers["Access-Control-Allow-Methods"]
-            == "POST, OPTIONS"
-        )
+        assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
         assert (
             headers["Access-Control-Allow-Headers"]
             == "content-type, accept, mcp-session-id"
@@ -239,10 +233,7 @@ class TestCORS:
         _status, headers, _body = handler.handle_options(
             request_origin="https://console.anthropic.com"
         )
-        assert (
-            headers["Access-Control-Allow-Origin"]
-            == "https://console.anthropic.com"
-        )
+        assert headers["Access-Control-Allow-Origin"] == "https://console.anthropic.com"
 
     def test_handle_options_falls_back_for_unknown_origin(self):
         """Unknown origins do NOT get reflected — default origin is used."""
@@ -252,10 +243,7 @@ class TestCORS:
             request_origin="https://attacker.example.com"
         )
         assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
-        assert (
-            "attacker.example.com"
-            not in headers["Access-Control-Allow-Origin"]
-        )
+        assert "attacker.example.com" not in headers["Access-Control-Allow-Origin"]
 
 
 class TestSessionID:
