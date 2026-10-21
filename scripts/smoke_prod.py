@@ -321,8 +321,8 @@ try:
     check("transport: supported version header -> 200", status == 200, f"{status}")
     status, body = raw_post({"jsonrpc": "2.0", "method": "notifications/initialized"})
     check(
-        "transport: notification -> accepted, empty body",
-        status in (200, 202) and not body,
+        "transport: notification -> 202, empty body",
+        status == 202 and not body,
         f"status={status}",
     )
 except Exception as e:
