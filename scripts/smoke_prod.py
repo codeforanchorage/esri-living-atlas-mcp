@@ -1,16 +1,17 @@
-"""Deployment smoke test for the San Diego GIS MCP server.
+"""Deployment smoke test for the ESRI Living Atlas MCP server.
 
-Exercises the JSON-RPC surface and the core arcgis tool chain end-to-end
-against a running deployment, finishing with the "verification query": a
-real parcel lookup at the San Diego City Administration Building (202 C St)
-used to confirm the connector. Read-only; paces calls to stay under typical
-API Gateway rate limits.
+Exercises the JSON-RPC surface, the Streamable HTTP transport rules and
+every Living Atlas tool end-to-end against a running deployment. Read-only;
+paces calls to stay under the API Gateway rate limit (5 rps) and the WAF
+per-IP cap (300/5min). Prints a pass/fail line per check and keeps going,
+so a partial outage is visible at a glance.
 
 Usage:
-    python3 scripts/smoke_prod.py [URL]
+    python scripts/smoke_prod.py [URL]
 
-URL defaults to a local server (http://localhost:8000/mcp); override with an
-argument or the OPENCONTEXT_SMOKE_URL env var to point at a deployment.
+URL defaults to prod (https://living-atlas.codeforanchorage.org/mcp);
+override with an argument or the OPENCONTEXT_SMOKE_URL env var, e.g. the
+local server: python scripts/smoke_prod.py http://localhost:8000/mcp
 """
 
 import json
@@ -18,279 +19,317 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 
 URL = (
     (sys.argv[1] if len(sys.argv) > 1 else None)
     or os.environ.get("OPENCONTEXT_SMOKE_URL")
-    or "http://localhost:8000/mcp"
+    or "https://living-atlas.codeforanchorage.org/mcp"
 )
+SERVER_NAME = "ESRI Living Atlas MCP"
+TOOL_PREFIX = "living_atlas__"
+N_TOOLS = 7
+EXPECTED_TOOLS = {
+    f"{TOOL_PREFIX}{t}"
+    for t in (
+        "search_living_atlas",
+        "get_item",
+        "list_categories",
+        "get_layer_schema",
+        "get_distinct_values",
+        "query_data",
+        "spatial_query_point",
+    )
+}
 
-# San Diego City Administration Building -- public landmark used as the demo.
-CITY_HALL_LON, CITY_HALL_LAT = -117.1626, 32.7170
+# Live fixtures (see scripts/smoke_living_atlas_live.py): an Anchorage point
+# for the FEMA flood layer, a subscriber-only item that must be refused, and
+# a community item that is NOT in the Living Atlas group (negative control).
+ANCHORAGE_LON, ANCHORAGE_LAT = -149.8936, 61.2176
+WORLD_TRAFFIC_ITEM = "ff11eb5b930b4fabba15c47feb130de4"  # subscriber content
+MOA_PARCELS_ITEM = "57d6ff611f444d75a1bf2b4a1d340163"  # community item, not LA
 
 _id = 0
 results = []
 
 
-def rpc(method, params=None):
+def raw_post(payload, extra_headers=None, http_method="POST"):
+    """POST and return (status, parsed body or None) without raising on 4xx."""
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    headers.update(extra_headers or {})
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(URL, data=data, headers=headers, method=http_method)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            status, raw = r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        status, raw = e.code, e.read().decode()
+    time.sleep(0.4)  # pace under 5 rps
+    try:
+        return status, json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        return status, raw
+
+
+def rpc(method, params=None, extra_headers=None):
     global _id
     _id += 1
     payload = {"jsonrpc": "2.0", "id": _id, "method": method}
     if params is not None:
         payload["params"] = params
-    req = urllib.request.Request(
-        URL,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        body = json.loads(r.read().decode())
-    time.sleep(0.4)  # pace under 5 rps
+    status, body = raw_post(payload, extra_headers)
+    if status != 200:
+        raise RuntimeError(f"HTTP {status}: {json.dumps(body)[:200]}")
     return body
 
 
 def call_tool(name, args):
-    return rpc("tools/call", {"name": f"arcgis__{name}", "arguments": args})
+    return rpc("tools/call", {"name": f"{TOOL_PREFIX}{name}", "arguments": args})
 
 
 def text_of(resp):
     return resp["result"]["content"][0]["text"]
 
 
+def first_item_id(text):
+    m = re.search(r"id: ([0-9a-f]{32})", text)
+    return m.group(1) if m else None
+
+
 def check(label, ok, detail=""):
-    results.append(ok)
+    results.append((label, ok))
     mark = "PASS" if ok else "FAIL"
     print(f"[{mark}] {label}" + (f" -- {detail}" if detail else ""))
 
 
 print(f"Smoke testing: {URL}\n")
 
-# 1. ping
+# 1. ping: the spec result is an empty object; the response IS the signal
 try:
     r = rpc("ping")
-    check("ping", r.get("result", {}).get("status") == "ok", str(r.get("result")))
+    check("ping -> {}", r.get("result") == {}, str(r.get("result")))
 except Exception as e:
-    check("ping", False, repr(e))
+    check("ping -> {}", False, repr(e))
 
-# 2. initialize
+# 2. initialize: configured serverInfo, requested version echoed, instructions
 try:
     r = rpc(
         "initialize",
         {
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-11-25",
             "capabilities": {},
             "clientInfo": {"name": "smoke", "version": "1.0"},
         },
     )
-    check("initialize", bool(r["result"]["serverInfo"]["name"]))
+    res = r["result"]
+    si = res["serverInfo"]
+    ok = (
+        si["name"] == SERVER_NAME
+        and res["protocolVersion"] == "2025-11-25"
+        and bool(res.get("instructions"))
+    )
+    check(
+        "initialize (serverInfo, version echo, instructions)",
+        ok,
+        json.dumps({"serverInfo": si, "protocolVersion": res["protocolVersion"]}),
+    )
 except Exception as e:
-    check("initialize", False, repr(e))
+    check("initialize (serverInfo, version echo, instructions)", False, repr(e))
 
-# 3. tools/list -- expect the eight arcgis tools, with the type filter advertised
+# 3. tools/list: the seven living_atlas tools, each with a title + readOnlyHint
 try:
     r = rpc("tools/list")
-    tools = {t["name"]: t for t in r["result"]["tools"]}
-    expected = {
-        "arcgis__search_datasets",
-        "arcgis__get_dataset",
-        "arcgis__get_aggregations",
-        "arcgis__query_data",
-        "arcgis__get_layer_schema",
-        "arcgis__get_distinct_values",
-        "arcgis__spatial_query_point",
-        "arcgis__geocode_address",
-    }
-    has_all = set(tools) == expected
-    type_arg = "type" in (
-        tools.get("arcgis__search_datasets", {})
-        .get("inputSchema", {})
-        .get("properties", {})
-    )
-    check(
-        "tools/list (8 tools + type filter)",
-        has_all and type_arg,
-        f"{sorted(tools)}",
-    )
-except Exception as e:
-    check("tools/list (8 tools + type filter)", False, repr(e))
-
-# 4. type filter actually restricts results -- SANDAG's catalog mixes Feature
-#    Services with Service Definitions, web maps, and apps; type='Feature
-#    Service' must return only queryable layers.
-try:
-    typed = text_of(
-        call_tool(
-            "search_datasets",
-            {"q": "parcels", "type": "Feature Service", "limit": 20},
-        )
-    )
+    tools = r["result"]["tools"]
+    names = {t["name"] for t in tools}
     ok = (
-        "Type: Feature Service" in typed
-        and "Type: Service Definition" not in typed
-        and "Type: Web Map" not in typed
+        len(tools) == N_TOOLS
+        and names == EXPECTED_TOOLS
+        and all(t.get("title") for t in tools)
+        and all(t.get("annotations", {}).get("readOnlyHint") is True for t in tools)
     )
-    check(
-        "type filter restricts to Feature Services",
-        ok,
-        "only Feature Services" if ok else "filter had no effect",
-    )
+    check("tools/list (7 tools, titles, readOnlyHint)", ok, f"{sorted(names)}")
 except Exception as e:
-    check("type filter restricts to Feature Services", False, repr(e))
+    check("tools/list (7 tools, titles, readOnlyHint)", False, repr(e))
 
-# 5. discovery -- find the SanGIS Parcels Feature Service by title
-parcels_id = None
+# 4. list_categories: the taxonomy (cached upstream, cheap)
 try:
-    s = text_of(
+    t = text_of(call_tool("list_categories", {}))
+    check("list_categories", "Land Cover" in t, t.split("\n")[0][:70])
+except Exception as e:
+    check("list_categories", False, repr(e))
+
+# 5. search_living_atlas: wildfire feature layers, capture an id
+wildfire_id = None
+try:
+    t = text_of(
         call_tool(
-            "search_datasets",
-            {"q": "parcels", "type": "Feature Service", "limit": 20},
+            "search_living_atlas",
+            {"query": "wildfire", "item_type": "Feature Layer", "max_results": 5},
         )
     )
-    m = re.search(r"\d+\. Parcels\s*\n\s*ID:\s*(\S+)", s)
-    parcels_id = m.group(1) if m else None
+    wildfire_id = first_item_id(t)
     check(
-        "search_datasets finds Parcels",
-        parcels_id is not None,
-        f"id={parcels_id}",
+        "search_living_atlas(wildfire)",
+        "TOTAL MATCHING" in t and wildfire_id is not None,
+        t.split("\n")[0][:70],
     )
 except Exception as e:
-    check("search_datasets finds Parcels", False, repr(e))
+    check("search_living_atlas(wildfire)", False, repr(e))
 
-# 6. get_dataset on the discovered id -- must carry the SanGIS attribution
-if parcels_id:
+# 6. get_item: credits (attribution) must be surfaced
+if wildfire_id:
     try:
-        t = text_of(call_tool("get_dataset", {"dataset_id": parcels_id}))
-        ok = "Parcels" in t and "Attribution:" in t and "SanGIS" in t
-        check("get_dataset(Parcels) with attribution", ok, f"{len(t)} chars")
+        t = text_of(call_tool("get_item", {"item_id": wildfire_id}))
+        check("get_item(wildfire) carries credits", "Credits (cite this):" in t)
     except Exception as e:
-        check("get_dataset(Parcels) with attribution", False, repr(e))
+        check("get_item(wildfire) carries credits", False, repr(e))
 
-# 7. the layer has queryable records at all (proves layer resolution)
-if parcels_id:
+# 7. discovery for the query chain: FEMA flood hazard (the reliable
+#    point-query layer; USA Structures rejects spatial queries server-side)
+flood_id = None
+try:
+    t = text_of(
+        call_tool(
+            "search_living_atlas",
+            {"query": "FEMA flood hazard", "item_type": "Feature Layer"},
+        )
+    )
+    flood_id = first_item_id(t)
+    check("search_living_atlas(FEMA flood hazard)", flood_id is not None)
+except Exception as e:
+    check("search_living_atlas(FEMA flood hazard)", False, repr(e))
+
+# 8. get_layer_schema: field list, capture a field name for distinct values
+flood_field = None
+if flood_id:
     try:
-        t = text_of(
-            call_tool(
-                "query_data", {"dataset_id": parcels_id, "where": "1=1", "limit": 1}
-            )
-        )
-        ok = (
-            "TOTAL MATCHING:" in t
-            and "Returned" in t
-            and "Invalid URL" not in t
-            and "failed" not in t
-        )
-        check("query_data total count (TOTAL MATCHING)", ok, t.split("\n")[0][:60])
+        t = text_of(call_tool("get_layer_schema", {"item_id": flood_id}))
+        m = re.search(r"Fields \(\d+\):\s*\n\s*[-*]?\s*([A-Za-z_][A-Za-z0-9_]*)", t)
+        flood_field = m.group(1) if m else None
+        check("get_layer_schema(flood)", "Fields (" in t, f"first field={flood_field}")
     except Exception as e:
-        check("query_data total count (TOTAL MATCHING)", False, repr(e))
+        check("get_layer_schema(flood)", False, repr(e))
 
-# 8. VERIFICATION QUERY -- parcels by APN prefix, selected fields. This is the
-#    headline end-to-end check: where clause + out_fields against live SanGIS
-#    data. Field names on the hosted layers are lowercase.
-if parcels_id:
+# 9. query_data: TOTAL MATCHING leads the output, so counts need no paging
+if flood_id:
     try:
-        t = text_of(
-            call_tool(
-                "query_data",
-                {
-                    "dataset_id": parcels_id,
-                    "where": "apn LIKE '7602%'",
-                    "out_fields": "apn,situs_address,situs_street",
-                    "limit": 5,
-                },
-            )
-        )
-        has_rows = "Record 1:" in t
-        right_shape = "apn:" in t and "situs_street:" in t
-        no_error = "Invalid URL" not in t and "failed" not in t
-        ok = has_rows and right_shape and no_error
-        check(
-            "verification query (parcels by APN prefix)",
-            ok,
-            t.split("\n")[0][:60] if ok else "ERROR/empty: " + t[:80],
-        )
+        t = text_of(call_tool("query_data", {"item_id": flood_id, "limit": 1}))
+        check("query_data(flood) TOTAL MATCHING", "TOTAL MATCHING:" in t, t[:60])
     except Exception as e:
-        check("verification query (parcels by APN prefix)", False, repr(e))
+        check("query_data(flood) TOTAL MATCHING", False, repr(e))
 
-# 9. get_layer_schema -- list fields for Parcels
-if parcels_id:
-    try:
-        t = text_of(call_tool("get_layer_schema", {"item_id": parcels_id}))
-        ok = "Fields (" in t and "apn" in t
-        check("get_layer_schema(Parcels)", ok, t.split("\n")[0][:60])
-    except Exception as e:
-        check("get_layer_schema(Parcels)", False, repr(e))
-
-# 10. get_distinct_values -- jurisdictions recorded on parcels
-if parcels_id:
+# 10. get_distinct_values on the first schema field
+if flood_id and flood_field:
     try:
         t = text_of(
             call_tool(
                 "get_distinct_values",
-                {"item_id": parcels_id, "field": "situs_juris", "limit": 25},
+                {"item_id": flood_id, "field": flood_field, "limit": 5},
             )
         )
         ok = "distinct value" in t
-        check("get_distinct_values(situs_juris)", ok, t.replace("\n", " ")[:60])
+        check(f"get_distinct_values({flood_field})", ok, t.split("\n")[0][:70])
     except Exception as e:
-        check("get_distinct_values(situs_juris)", False, repr(e))
+        check(f"get_distinct_values({flood_field})", False, repr(e))
 
-# 11. spatial_query_point -- which parcel contains San Diego City Hall?
-if parcels_id:
+# 11. spatial_query_point: FEMA flood zone at an Anchorage point
+if flood_id:
     try:
-        t = text_of(
-            call_tool(
-                "spatial_query_point",
-                {
-                    "item_id": parcels_id,
-                    "lon": CITY_HALL_LON,
-                    "lat": CITY_HALL_LAT,
-                    "out_fields": "apn,situs_address,situs_street",
-                    "limit": 3,
-                },
-            )
+        r = call_tool(
+            "spatial_query_point",
+            {"item_id": flood_id, "lon": ANCHORAGE_LON, "lat": ANCHORAGE_LAT, "limit": 3},
         )
-        ok = "Returned" in t and "apn" in t and "Invalid URL" not in t
-        check("spatial_query_point(parcel @ City Hall)", ok, t.split("\n")[0][:60])
+        ok = not r["result"].get("isError")
+        check("spatial_query_point(flood @ Anchorage)", ok, text_of(r)[:70])
     except Exception as e:
-        check("spatial_query_point(parcel @ City Hall)", False, repr(e))
+        check("spatial_query_point(flood @ Anchorage)", False, repr(e))
 
-# 12. geocode_address -- street address to lon/lat (SANDAG composite locator).
+# 12. premium content is refused cleanly (no raw 403, no tokens ever)
 try:
-    t = text_of(call_tool("geocode_address", {"address": "202 C St, San Diego, CA"}))
-    ok = "match(es)" in t and "lon:" in t and "lat:" in t
-    check("geocode_address(City Hall)", ok, t.split("\n")[0][:60])
+    r = call_tool("query_data", {"item_id": WORLD_TRAFFIC_ITEM})
+    t = text_of(r)
+    ok = r["result"].get("isError") is True and "subscriber" in t.lower()
+    check("premium item -> clean refusal", ok, t[:70])
 except Exception as e:
-    check("geocode_address(City Hall)", False, repr(e))
+    check("premium item -> clean refusal", False, repr(e))
 
-# 13. spatial_query_point BY ADDRESS -- geocode + point-in-polygon in one call
-if parcels_id:
-    try:
-        t = text_of(
-            call_tool(
-                "spatial_query_point",
-                {
-                    "item_id": parcels_id,
-                    "address": "202 C St, San Diego, CA",
-                    "out_fields": "apn,situs_address,situs_street",
-                    "limit": 2,
-                },
-            )
-        )
-        ok = "Geocoded" in t and "Returned" in t and "Invalid URL" not in t
-        check("spatial_query_point(by address)", ok, t.split("\n")[0][:60])
-    except Exception as e:
-        check("spatial_query_point(by address)", False, repr(e))
-
-# 14. get_aggregations sanity
+# 13. anti-laundering: a non-Living-Atlas item id is refused
 try:
-    t = text_of(call_tool("get_aggregations", {"field": "type", "q": "parcels"}))
-    check("get_aggregations(type)", "dataset(s)" in t, t.replace("\n", " ")[:60])
+    r = call_tool("get_item", {"item_id": MOA_PARCELS_ITEM})
+    t = text_of(r)
+    ok = r["result"].get("isError") is True and "not in the Living Atlas catalog" in t
+    check("non-Living-Atlas item -> refused", ok, t[:70])
 except Exception as e:
-    check("get_aggregations(type)", False, repr(e))
+    check("non-Living-Atlas item -> refused", False, repr(e))
+
+# 14. caller errors are protocol errors, not -32603 Internal error
+try:
+    r = call_tool("nope", {})
+    err = r.get("error", {})
+    ok = err.get("code") == -32602 and "Available tools" in str(err.get("data"))
+    check("unknown tool -> -32602 + available list", ok, json.dumps(err)[:80])
+except Exception as e:
+    check("unknown tool -> -32602 + available list", False, repr(e))
+
+try:
+    r = rpc("server/discover")
+    err = r.get("error", {})
+    check("unknown method -> -32601", err.get("code") == -32601, json.dumps(err)[:80])
+except Exception as e:
+    check("unknown method -> -32601", False, repr(e))
+
+try:
+    r = call_tool("query_data", {"item_id": "not-a-hex-id"})
+    t = text_of(r)
+    ok = r["result"].get("isError") is True and "32-character hex" in t
+    check("bad item_id -> readable tool error", ok, t[:70])
+except Exception as e:
+    check("bad item_id -> readable tool error", False, repr(e))
+
+# 15. transport hygiene: GET 405, bad Origin 403, unsupported version 400
+#     with -32022 and the request id echoed, notification accepted empty
+try:
+    status, _ = raw_post(None, {"Accept": "text/event-stream"}, http_method="GET")
+    check("transport: GET /mcp -> 405", status == 405, f"status={status}")
+    status, _ = raw_post(
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"Origin": "https://evil.example"},
+    )
+    check("transport: bad Origin -> 403", status == 403, f"status={status}")
+    status, body = raw_post(
+        {"jsonrpc": "2.0", "id": 4242, "method": "ping"},
+        {"MCP-Protocol-Version": "1999-01-01"},
+    )
+    err = (body or {}).get("error", {})
+    ok = (
+        status == 400
+        and err.get("code") == -32022
+        and err.get("data", {}).get("requested") == "1999-01-01"
+        and "2025-11-25" in err.get("data", {}).get("supported", [])
+        and (body or {}).get("id") == 4242
+    )
+    check(
+        "transport: unsupported version -> 400/-32022 (id echoed)",
+        ok,
+        f"status={status} id={(body or {}).get('id')} code={err.get('code')}",
+    )
+    status, body = raw_post(
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"MCP-Protocol-Version": "2025-11-25"},
+    )
+    check("transport: supported version header -> 200", status == 200, f"{status}")
+    status, body = raw_post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    check(
+        "transport: notification -> accepted, empty body",
+        status in (200, 202) and not body,
+        f"status={status}",
+    )
+except Exception as e:
+    check("transport hygiene", False, repr(e))
+
 
 print("\n=== SUMMARY ===")
-n_pass = sum(results)
+n_pass = sum(1 for _, ok in results if ok)
 print(f"{n_pass}/{len(results)} checks passed")
 sys.exit(0 if n_pass == len(results) else 1)

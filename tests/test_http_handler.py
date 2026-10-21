@@ -200,7 +200,7 @@ class TestCORS:
             assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
             assert (
                 headers["Access-Control-Allow-Headers"]
-                == "content-type, accept, mcp-session-id"
+                == "content-type, accept, mcp-session-id, mcp-protocol-version, mcp-method, mcp-name"
             )
 
     def test_handle_options_returns_cors_headers(self):
@@ -216,7 +216,7 @@ class TestCORS:
         assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
         assert (
             headers["Access-Control-Allow-Headers"]
-            == "content-type, accept, mcp-session-id"
+            == "content-type, accept, mcp-session-id, mcp-protocol-version, mcp-method, mcp-name"
         )
         assert headers["Access-Control-Max-Age"] == "86400"
         assert body == ""
@@ -235,14 +235,15 @@ class TestCORS:
         )
         assert headers["Access-Control-Allow-Origin"] == "https://console.anthropic.com"
 
-    def test_handle_options_falls_back_for_unknown_origin(self):
-        """Unknown origins do NOT get reflected — default origin is used."""
+    def test_handle_options_rejects_unknown_origin(self):
+        """A preflight from a non-allowlisted origin is refused with 403,
+        so the browser never issues the actual request."""
         handler = UniversalHTTPHandler()
 
-        _status, headers, _body = handler.handle_options(
+        status, headers, _body = handler.handle_options(
             request_origin="https://attacker.example.com"
         )
-        assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
+        assert status == 403
         assert "attacker.example.com" not in headers["Access-Control-Allow-Origin"]
 
 

@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from core.interfaces import InvalidToolParamsError, UnknownToolError
 from core.logging_utils import (
     format_jsonrpc_request_log,
     format_jsonrpc_response_log,
@@ -17,8 +18,39 @@ from core.plugin_manager import PluginManager
 logger = logging.getLogger(__name__)
 
 
+class MethodNotFoundError(Exception):
+    """Raised when a request names a method this server does not implement.
+
+    Mapped to JSON-RPC -32601 ("Method not found") rather than the generic
+    -32603 ("Internal error"): an unknown method is a client-side mistake,
+    not a server fault, and clients probing for optional MCP methods rely
+    on the distinction.
+    """
+
+
 class MCPServer:
     """MCP Server that handles JSON-RPC requests and routes to Plugin Manager."""
+
+    # MCP protocol revisions this server implements, newest first. The wire
+    # format for a tools-only server is compatible across these -- each
+    # revision's additions (icons, tasks, elicitation) are optional and
+    # unused here -- so we echo the client's requested version when it's one
+    # we recognize, else fall back to a known-good default. (Previously this
+    # was hardcoded to 2025-03-26, which silently downgraded every client
+    # that asked for 2025-11-25.)
+    #
+    # NOT listed: 2026-07-28, which drops the initialize handshake entirely
+    # in favour of per-request `_meta` and a mandatory server/discover RPC.
+    # That is a dual-era migration, not a version-string addition, so a
+    # client declaring it is correctly rejected until that work lands.
+    SUPPORTED_PROTOCOL_VERSIONS = (
+        "2025-11-25",
+        "2025-06-18",
+        "2025-03-26",
+        "2024-11-05",
+    )
+    # Spec-defined assumption for HTTP clients that send no version at all.
+    DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 
     def __init__(self, plugin_manager: PluginManager) -> None:
         """Initialize MCP Server with Plugin Manager.
@@ -57,19 +89,33 @@ class MCPServer:
             params=params,
             is_notification=is_notification,
         )
+        # Flatten client identity and the requested revision onto the log
+        # line so the fleet's client-family dashboards can read them without
+        # parsing params.
+        if method == "initialize" and isinstance(params, dict):
+            client_info = params.get("clientInfo")
+            if isinstance(client_info, dict):
+                request_log_data["mcp_client_name"] = client_info.get("name")
+                request_log_data["mcp_client_version"] = client_info.get("version")
+            if params.get("protocolVersion") is not None:
+                request_log_data["mcp_protocol_version"] = params["protocolVersion"]
         if session_id:
             request_log_data["mcp_session_id"] = session_id
         logger.info("JSON-RPC request received", extra=request_log_data)
 
         try:
             if method == "initialize":
-                result = await self._handle_initialize(params)
+                result = await self._handle_initialize(
+                    params if isinstance(params, dict) else {}
+                )
             elif method == "tools/list":
                 result = await self._handle_tools_list()
             elif method == "tools/call":
                 result = await self._handle_tools_call(params)
             elif method == "ping":
-                result = {"status": "ok"}
+                # The spec defines the ping result as an empty object; the
+                # liveness signal is the response itself, not its body.
+                result = {}
             elif method == "notifications/initialized":
                 # MCP notification - no response needed
                 duration_ms = (time.perf_counter() - start_time) * 1000
@@ -93,7 +139,7 @@ class MCPServer:
                         },
                     )
                     return None
-                raise ValueError(f"Unknown method: {method}")
+                raise MethodNotFoundError(f"Unknown method: {method}")
 
             # Don't send response for notifications
             if is_notification:
@@ -131,13 +177,32 @@ class MCPServer:
 
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
+            # Caller errors (an unknown method, an unknown tool, a malformed
+            # tools/call) are the client's mistake, not a server fault: they
+            # get their own JSON-RPC code, a WARNING-level log, and no
+            # traceback. Anything else is genuinely ours and stays
+            # -32603 + ERROR + exc_info -- that is what those logs are for.
+            if isinstance(e, MethodNotFoundError):
+                code, message, data = -32601, "Method not found", str(e)
+            elif isinstance(e, InvalidToolParamsError):
+                code, message, data = -32602, "Invalid params", str(e)
+            elif isinstance(e, UnknownToolError):
+                # Shape follows the tools spec's own example:
+                # {"code": -32602, "message": "Unknown tool: <name>"}.
+                # The available-tool list rides in `data` so a model can
+                # self-correct rather than just being told "no".
+                code, message = -32602, str(e)
+                data = f"Available tools: {e.available}" if e.available else str(e)
+            else:
+                code, message, data = -32603, "Internal error", str(e)
+            is_caller_error = code != -32603
             error_response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {
-                    "code": -32603,
-                    "message": "Internal error",
-                    "data": str(e),
+                    "code": code,
+                    "message": message,
+                    "data": data,
                 },
             }
 
@@ -150,10 +215,11 @@ class MCPServer:
             )
             if session_id:
                 response_log_data["mcp_session_id"] = session_id
-            logger.error(
+            log = logger.warning if is_caller_error else logger.error
+            log(
                 f"Error handling JSON-RPC request {method}: {e}",
                 extra={**response_log_data, "error_type": type(e).__name__},
-                exc_info=True,
+                exc_info=not is_caller_error,
             )
 
             # Don't send error response for notifications
@@ -161,8 +227,18 @@ class MCPServer:
                 return None
             return error_response
 
+    def _config(self) -> Dict[str, Any]:
+        """The deployment config the plugin manager was built from, or {}."""
+        return getattr(self.plugin_manager, "config", None) or {}
+
     async def _handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Handle initialize request.
+
+        Negotiates the protocol version against the client's request and
+        populates serverInfo / instructions from config so each deployment
+        can identify itself and steer the model independently. (Previously
+        serverInfo was a hardcoded "opencontext"/"1.0.0", so every fork in
+        the fleet introduced itself with the same name.)
 
         Args:
             params: Initialize parameters
@@ -170,16 +246,32 @@ class MCPServer:
         Returns:
             Initialize response
         """
-        return {
-            "protocolVersion": "2025-03-26",
+        config = self._config()
+
+        requested_version = params.get("protocolVersion")
+        protocol_version = (
+            requested_version
+            if requested_version in self.SUPPORTED_PROTOCOL_VERSIONS
+            else self.DEFAULT_PROTOCOL_VERSION
+        )
+
+        result: Dict[str, Any] = {
+            "protocolVersion": protocol_version,
             "capabilities": {
                 "tools": {},
             },
             "serverInfo": {
-                "name": "opencontext",
-                "version": "1.0.0",
+                "name": config.get("server_name", "OpenContext"),
+                "version": str(config.get("server_version", "1.0.0")),
             },
         }
+
+        # Optional per-deployment guidance string surfaced to the client/model.
+        instructions = config.get("instructions")
+        if instructions:
+            result["instructions"] = instructions
+
+        return result
 
     async def _handle_tools_list(self) -> Dict[str, Any]:
         """Handle tools/list request.
@@ -190,7 +282,7 @@ class MCPServer:
         tools = self.plugin_manager.get_all_tools()
         return {"tools": tools}
 
-    async def _handle_tools_call(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_tools_call(self, params: Any) -> Dict[str, Any]:
         """Handle tools/call request.
 
         Args:
@@ -199,18 +291,47 @@ class MCPServer:
         Returns:
             Tool execution result
         """
+        # Validate the request shape before dispatch. All three of these
+        # are malformed CallToolRequests, not server faults: without this,
+        # a missing name surfaced as -32603 "Internal error", and a
+        # non-object `params` or `arguments` reached `.get()` and came
+        # back as a raw Python AttributeError ("'str' object has no
+        # attribute 'get'") dressed up as a tool result.
+        if not isinstance(params, dict):
+            raise InvalidToolParamsError(
+                f"Parameter 'params' must be an object, got {type(params).__name__}"
+            )
+
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
+        # `arguments` is optional; an explicit null means "no arguments".
+        if arguments is None:
+            arguments = {}
 
         if not tool_name:
-            raise ValueError("Tool name is required")
+            raise InvalidToolParamsError(
+                "Missing required parameter 'name' (the tool to call)"
+            )
+        if not isinstance(arguments, dict):
+            raise InvalidToolParamsError(
+                f"Parameter 'arguments' must be an object, got "
+                f"{type(arguments).__name__}"
+            )
 
         result = await self.plugin_manager.execute_tool(tool_name, arguments)
 
         if result.success:
-            return {
+            response: Dict[str, Any] = {
                 "content": result.content,
             }
+            # `structuredContent` is the machine-readable twin of `content`.
+            # Only tools that declare an outputSchema populate it, and the
+            # spec requires the value conform to that schema. `content`
+            # still carries the human-readable rendering: clients that
+            # ignore structured output are unaffected.
+            if result.structured_content is not None:
+                response["structuredContent"] = result.structured_content
+            return response
         else:
             error_msg = result.error_message or "An unknown error occurred"
             # Include error in content so all clients (curl, Inspector, Claude) receive it.
@@ -243,26 +364,22 @@ class MCPServer:
         try:
             request = json.loads(body)
         except json.JSONDecodeError as e:
-            logger.error(
+            # A malformed body is the caller's mistake. -32700 already
+            # tells them exactly that; our own parse traceback adds
+            # nothing and reads as a server fault.
+            logger.warning(
                 f"Invalid JSON in request body: {e}",
                 extra={"error_type": "JSONDecodeError"},
-                exc_info=True,
             )
-            return {
-                "statusCode": 400,
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": None,
-                        "error": {
-                            "code": -32700,
-                            "message": "Parse error",
-                            "data": str(e),
-                        },
-                    }
-                ),
-            }
+            return self._http_error(400, None, -32700, "Parse error", str(e))
+        if not isinstance(request, dict):
+            return self._http_error(
+                400,
+                None,
+                -32600,
+                "Invalid Request",
+                "Request body must be a single JSON-RPC object",
+            )
 
         # Pull MCP session ID from headers (lowercased by the Lambda adapter)
         # so downstream log lines can be grouped by session.
@@ -285,4 +402,21 @@ class MCPServer:
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps(response),
+        }
+
+    @staticmethod
+    def _http_error(
+        status: int,
+        request_id: Any,
+        code: int,
+        message: str,
+        data: Any = None,
+    ) -> Dict[str, Any]:
+        error: Dict[str, Any] = {"code": code, "message": message}
+        if data is not None:
+            error["data"] = data
+        return {
+            "statusCode": status,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"jsonrpc": "2.0", "id": request_id, "error": error}),
         }

@@ -24,9 +24,13 @@ Facts verified empirically against the live API (full detail + raw captures in `
 # Install dependencies (uv preferred, pip fallback)
 uv sync                              # or: pip install -r requirements.txt
 
-# Run local MCP server (no Lambda needed)
-python3 scripts/local_server.py      # Serves on http://localhost:8000/mcp
-# Or: python3 local_server.py        # Alternate entry point, serves on / and /mcp
+# Run local MCP server (no Lambda needed). Routes through the same
+# UniversalHTTPHandler as Lambda, so Origin / protocol-version checks apply.
+python scripts/local_server.py       # Serves on http://localhost:8000/mcp
+# OPENCONTEXT_LOCAL_PORT=8765 if another fork's server holds 8000
+
+# Smoke test a deployment (defaults to prod; pass a URL for local/staging)
+python scripts/smoke_prod.py [http://localhost:8000/mcp]
 
 # Validate config
 python3 -c "from core.validators import load_and_validate_config; load_and_validate_config('config.yaml')"
@@ -35,12 +39,14 @@ python3 -c "from core.validators import load_and_validate_config; load_and_valid
 uv run pytest tests/ -n auto                                    # All tests, parallel
 uv run pytest tests/test_ckan_plugin.py -v                      # Single file
 uv run pytest tests/test_ckan_plugin.py::TestClass::test_name -v  # Single test
-uv run pytest tests/ --cov=core --cov=plugins --cov-report=term-missing  # With coverage (80% minimum)
+uv run pytest tests/ --cov=core --cov=plugins --cov-report=term-missing  # With coverage (reported, not enforced)
 
 # Linting (ruff)
-uv run ruff check core/ plugins/ server/ tests/      # Check
-uv run ruff check core/ plugins/ server/ tests/ --fix # Auto-fix
-uv run ruff format core/ plugins/ server/ tests/      # Format
+uv run ruff check core/ plugins/ server/ tests/ scripts/  # Check (CI runs exactly this)
+uv run ruff check core/ plugins/ server/ tests/ --fix      # Auto-fix
+uv run ruff format --check core/ plugins/ server/ tests/   # CI gate; the tree is clean
+# ruff is pinned to 0.15.11 (pyproject, pre-commit, CI). scripts/ is
+# hand-wrapped and lint-only: never run a wholesale `ruff format` on it.
 
 # Pre-commit hooks
 pre-commit run --all-files
@@ -59,18 +65,18 @@ cd client && make build
 **Request flow:**
 ```
 Claude (stdio) → Go client (client/) or stdio_bridge.py → HTTP POST /mcp
-  → Lambda (server/adapters/aws_lambda.py) or local_server.py
+  → Lambda (server/adapters/aws_lambda.py) or scripts/local_server.py
   → server/http_handler.py → core/mcp_server.py (JSON-RPC 2.0)
   → core/plugin_manager.py → Plugin → External API
 ```
 
 **Key modules:**
-- `core/interfaces.py` — Abstract bases: `MCPPlugin`, `DataPlugin`, plus `ToolDefinition`, `ToolResult`, `PluginType` enum
+- `core/interfaces.py` — Abstract bases: `MCPPlugin`, `DataPlugin`, plus `ToolDefinition` (name / title / description / input_schema / output_schema / annotations), `ToolResult` (content + structured_content), the caller-error classes `ToolInputError`, `InvalidToolParamsError`, `UnknownToolError`, and the `PluginType` enum
 - `core/plugin_manager.py` — Discovers plugins by scanning `plugins/` and `custom_plugins/` for `plugin.py` files. Registers tools with `pluginname__toolname` prefix. Routes `tools/call` to the correct plugin.
-- `core/mcp_server.py` — Handles MCP JSON-RPC methods: `initialize`, `tools/list`, `tools/call`, `ping`
+- `core/mcp_server.py` — Handles MCP JSON-RPC methods: `initialize`, `tools/list`, `tools/call`, `ping`. Negotiates the protocol version against `SUPPORTED_PROTOCOL_VERSIONS`, builds `serverInfo`/`instructions` from config, and maps caller errors (`MethodNotFoundError`, `InvalidToolParamsError`, `UnknownToolError`) to their JSON-RPC codes, logged at WARNING with no traceback.
 - `core/validators.py` — Loads config from `config.yaml` (local) or `OPENCONTEXT_CONFIG` env var (Lambda). Enforces single-plugin rule.
 - `server/adapters/aws_lambda.py` — AWS Lambda entry point (handler: `server.adapters.aws_lambda.lambda_handler`). Also `server/lambda_handler.py` as legacy entry point.
-- `server/http_handler.py` — Cloud-agnostic HTTP handler shared by Lambda and local server
+- `server/http_handler.py` — Cloud-agnostic HTTP handler shared by Lambda and local server. Enforces the Origin allowlist (403), validates `MCP-Protocol-Version` (400/-32022, `initialize` exempt), mints the per-session id, and adds CORS.
 - `stdio_bridge.py` — Python stdio-to-HTTP bridge for connecting Claude Desktop/Code to the local server (alternative to Go client)
 
 **Built-in plugins** (`plugins/`): `ckan`, `arcgis`, `socrata`, `living_atlas` — each implements `DataPlugin` with `search_datasets`, `get_dataset`, `query_data`. This fork enables `living_atlas` (which reuses `plugins/arcgis/where_validator.py` for WHERE/out_fields/order_by hardening). Custom plugins go in `custom_plugins/` and are auto-discovered.
@@ -81,8 +87,62 @@ New plugins must implement `MCPPlugin` (or `DataPlugin` for data sources). Place
 
 ## Configuration
 
-Copy `config-example.yaml` to `config.yaml`. Enable exactly one plugin. Config supports `${ENV_VAR}` substitution. For Lambda, config is serialized to the `OPENCONTEXT_CONFIG` env var by Terraform.
+`config.yaml` is TRACKED in this fork (unlike the other forks) and is the source of truth the deploy packages. Enable exactly one plugin. For Lambda, config is serialized to the `OPENCONTEXT_CONFIG` env var by Terraform, which AWS caps at 4KB total — `tests/test_config_validation.py::TestEnvVarBudget` keeps 512 bytes of headroom, so keep the `instructions` block short (or move to a packaged config file like the other forks if it must grow). `aws.lambda_timeout` in config OVERRIDES the tfvars value (main.tf reads config first); a test pins the two equal. `terraform/aws/config.yaml` is a gitignored build artifact that `deploy.sh` overwrites — a bare `terraform plan` in that directory reads the stale copy.
+
+## MCP conformance invariants
+
+These are contracts, not preferences — each is enforced by a test. If you change
+the behaviour, change the test deliberately rather than deleting it.
+
+- **Protocol negotiation** — supported revisions are a tuple in
+  `MCPServer.SUPPORTED_PROTOCOL_VERSIONS` (2025-11-25 … 2024-11-05, newest first).
+  `initialize` echoes the client's version when recognized, otherwise answers with
+  the default 2025-03-26. An absent `MCP-Protocol-Version` header means the
+  spec-defined 2025-03-26 and is NOT an error; an unsupported one is HTTP 400 with
+  `-32022` and the supported list, request id echoed (null for a notification or an
+  unparseable body). `initialize` itself is exempt from that header check, or a
+  client naming an unsupported revision could never reach the handshake that would
+  settle on a supported one. 2026-07-28 is deliberately NOT supported yet: it drops
+  the handshake for per-request `_meta` and is a dual-era migration, not a
+  version-string addition.
+- **Server identity comes from config** — `serverInfo` is `server_name` /
+  `server_version` and `instructions` is the `instructions` block, never a
+  hardcoded "opencontext".
+- **Error codes** — `ping` returns `{}`. Unknown method is `-32601`. Unknown tool and
+  malformed `tools/call` (non-object `params`, missing `name`, non-object
+  `arguments`) are `-32602` and never reach a plugin; `arguments: null` means `{}`.
+  `-32603` + ERROR + traceback is reserved for genuine faults. A non-object JSON-RPC
+  body is `-32600` on HTTP 400; unparseable JSON is `-32700` on 400.
+- **Caller errors never log a traceback.** Raise `ToolInputError` (a `ValueError`
+  subclass) for anything the caller got wrong; the plugin logs it at WARNING.
+  Numeric arguments go through `_int_arg` / `_float_arg` so a bad `limit` names the
+  argument instead of leaking "invalid literal for int()". Static drift guards in
+  `tests/test_caller_error_logging.py` pin zero plain `raise ValueError(` sites in the
+  plugin and validator and zero bare `int()`/`float()` over caller input, because a
+  new site has to be classified deliberately. `UpstreamUnavailable` (timeout, 5xx,
+  transport failure) is also WARNING without a traceback — it is ArcGIS Online's
+  incident, not ours.
+- **Tool metadata** — every tool carries a top-level `title` (from `TOOL_TITLES`,
+  tested in both directions so a renamed tool fails) and
+  `annotations: {readOnlyHint: true, openWorldHint: true}`; `idempotentHint` is
+  deliberately absent (meaningful only when `readOnlyHint` is false).
+- **The Origin allowlist is enforced** with HTTP 403 before any routing or plugin
+  code (and on the preflight), not merely reflected in CORS headers. Requests with
+  NO Origin are allowed — DNS rebinding is browser-only and every native client
+  sends none. `Access-Control-Allow-Headers` includes `mcp-protocol-version`,
+  `mcp-method`, `mcp-name`.
+- **Local dev runs prod's handler.** `scripts/local_server.py` adapts aiohttp onto
+  `UniversalHTTPHandler`, so the checks above are exercised locally. `tests/conftest.py`
+  restores the handler's warm-start globals around every test (guarded by
+  `tests/test_global_state_isolation.py`).
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs ruff lint/format, pip-audit, pytest with coverage, and Go tests on push to main/develop and on PRs.
+`.github/workflows/ci.yml` runs on push to main/develop and on every PR:
+
+- **Lint & test (Python 3.11, the Lambda runtime)** — `ruff check` (incl. `scripts/`),
+  `ruff format --check` with no exclusions, a config-validation step that asserts the
+  timeout ladder (plugin < lambda < API Gateway's hard 29s), then the full pytest
+  suite with coverage. Ruff is pinned to 0.15.11 everywhere.
+- **pip-audit** on `requirements.txt` — the runtime deps that ship in the zip.
+- **Go client** — `go vet` and `go test` in `client/`.

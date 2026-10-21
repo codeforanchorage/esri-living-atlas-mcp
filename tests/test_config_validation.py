@@ -6,6 +6,7 @@ the "one fork = one MCP server" rule and catches all invalid configurations.
 
 import pytest
 import tempfile
+import json
 import os
 import re
 import yaml
@@ -429,3 +430,28 @@ class TestTimeoutLadder:
                 f"{env}.tfvars lambda_timeout {match.group(1)} != "
                 f"config.yaml {config_timeout}"
             )
+
+
+class TestEnvVarBudget:
+    """The whole config ships to the Lambda as the OPENCONTEXT_CONFIG env
+    var (terraform/aws/main.tf serializes it with jsonencode). AWS caps the
+    total size of a function's environment variables at 4KB; blowing it
+    fails the deploy with an opaque Terraform error. The other forks moved
+    to a packaged config file for this reason; this one is small enough to
+    stay on the env var as long as the `instructions` block is kept short.
+    """
+
+    AWS_ENV_LIMIT = 4096
+    MARGIN = 512
+
+    def test_serialized_config_fits_in_lambda_env_with_margin(self):
+        config = load_and_validate_config(
+            os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+        )
+        size = len(json.dumps(config))
+        assert size <= self.AWS_ENV_LIMIT - self.MARGIN, (
+            f"config.yaml serializes to {size} bytes; the Lambda env-var "
+            f"budget is {self.AWS_ENV_LIMIT} and this test keeps "
+            f"{self.MARGIN} bytes of headroom. Trim `instructions` or "
+            f"move to a packaged config file like the other forks."
+        )

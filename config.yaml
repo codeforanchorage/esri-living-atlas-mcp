@@ -9,6 +9,9 @@
 ---
 # Server metadata
 server_name: "ESRI Living Atlas MCP"
+# Surfaced as serverInfo.version on initialize / server/discover; bump when
+# the protocol surface changes so a client can tell deployments apart.
+server_version: "1.1.0"
 description: >-
   Discovery + query surface over ArcGIS Living Atlas of the World -- Esri's
   curated catalog of authoritative geographic content (feature layers,
@@ -16,6 +19,33 @@ description: >-
   pretrained GeoAI models). Unofficial community on-ramp using the public
   sharing REST API; read-only, anonymous, premium content out of scope.
 organization: "Code for Anchorage"
+
+# Guidance handed to the model on initialize (legacy) and server/discover
+# (2026-07-28). Keep it short: the whole config ships to the Lambda in the
+# OPENCONTEXT_CONFIG env var, which AWS caps at 4KB in total --
+# tests/test_config_validation.py::TestEnvVarBudget pins the margin.
+instructions: |-
+  You are connected to ArcGIS Living Atlas of the World, Esri's curated
+  catalog of authoritative geographic content (~10,800 items: feature
+  layers, imagery, boundaries, demographics, environment, live feeds, and
+  100+ pretrained GeoAI models). Read-only, anonymous, live catalog.
+
+  Workflow:
+  1. search_living_atlas(query, item_type?, category?, region?) to find
+     items; list_categories for exact category/region spellings.
+  2. get_item(item_id) for credits, license, update cadence and the layer
+     list -- do this before querying so you can cite the provider.
+  3. get_layer_schema, then query_data (WHERE/out_fields/bbox) or
+     spatial_query_point (lon FIRST, WGS84). get_distinct_values confirms
+     exact codes. Field names are case-sensitive.
+
+  Rules: only Living Atlas item IDs are accepted (arbitrary ArcGIS Online
+  services are refused). Subscriber/premium items are refused cleanly; no
+  tokens, ever. An empty search is not authoritative absence -- try other
+  terms or a category. Always report an item's credits (accessInformation):
+  providers include federal agencies and NGOs, not just Esri. Some huge
+  national layers reject spatial queries server-side; prefer a narrower
+  layer or a bbox. All coordinates in and out are WGS84 (EPSG:4326).
 
 # Plugin configuration
 # ====================

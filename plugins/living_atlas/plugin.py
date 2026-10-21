@@ -35,7 +35,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from core.interfaces import DataPlugin, PluginType, ToolDefinition, ToolResult
+from core.interfaces import (
+    DataPlugin,
+    PluginType,
+    ToolDefinition,
+    ToolInputError,
+    ToolResult,
+)
 from plugins.arcgis.where_validator import (
     OrderByValidator,
     OutFieldsValidator,
@@ -57,6 +63,28 @@ _ITEM_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 # ArcGIS answers token-required requests with HTTP 401/403 or an HTTP-200
 # body whose error.code is one of these ("Token Required" is 499).
 _AUTH_ERROR_CODES = {401, 403, 498, 499}
+
+
+def _int_arg(value: Any, name: str) -> int:
+    """Coerce a caller-supplied argument to int, or raise ToolInputError.
+
+    A bare int() over caller input raises "invalid literal for int() with
+    base 10: 'abc'" -- a server-fault-shaped message with a traceback,
+    telling the caller nothing about which argument was wrong.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ToolInputError(f"{name} must be an integer (got {value!r})") from None
+
+
+def _float_arg(value: Any, name: str) -> float:
+    """Coerce a caller-supplied argument to float, or raise ToolInputError."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ToolInputError(f"{name} must be a number (got {value!r})") from None
+
 
 # Friendly aliases -> concrete ArcGIS item types for search's item_type.
 _TYPE_ALIASES = {
@@ -391,7 +419,7 @@ class LivingAtlasPlugin(DataPlugin):
             return matches[0]
         if len(matches) > 1:
             options = ", ".join(f"'{m}'" for m in matches)
-            raise ValueError(
+            raise ToolInputError(
                 f"Category '{category}' is ambiguous: {options}. Pass a "
                 f"more specific path (see list_categories)."
             )
@@ -402,7 +430,7 @@ class LivingAtlasPlugin(DataPlugin):
             wanted[-1] if wanted else category, leaves, n=1, cutoff=0.5
         )
         hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
-        raise ValueError(
+        raise ToolInputError(
             f"Unknown Living Atlas category '{category}'.{hint} Call "
             f"list_categories for the full taxonomy."
         )
@@ -416,7 +444,7 @@ class LivingAtlasPlugin(DataPlugin):
         if code == "WORLD":
             code = "WO"
         if code not in region_codes:
-            raise ValueError(
+            raise ToolInputError(
                 f"Unknown region '{region}'. Use a 2-letter country code "
                 f"from list_categories (e.g. 'US', 'CA', 'WO' for world)."
             )
@@ -488,7 +516,7 @@ class LivingAtlasPlugin(DataPlugin):
         category: Optional[str] = None,
         region: Optional[str] = None,
     ) -> Dict[str, Any]:
-        limit = max(1, min(int(limit), self.SEARCH_MAX))
+        limit = max(1, min(_int_arg(limit, "max_results"), self.SEARCH_MAX))
         categories: List[str] = []
         if category:
             categories.append(await self._resolve_category(category))
@@ -514,7 +542,7 @@ class LivingAtlasPlugin(DataPlugin):
         """
         item_id = (dataset_id or "").strip().lower()
         if not _ITEM_ID_RE.match(item_id):
-            raise ValueError(
+            raise ToolInputError(
                 f"Invalid item ID {dataset_id!r}: expected a 32-character "
                 f"hex ArcGIS Online item ID (from search_living_atlas)."
             )
@@ -524,7 +552,7 @@ class LivingAtlasPlugin(DataPlugin):
 
         membership = await self._group_search(f"id:{item_id}", num=1)
         if not membership["results"]:
-            raise ValueError(
+            raise ToolInputError(
                 f"Item {item_id} is not in the Living Atlas catalog. This "
                 f"server only serves Living Atlas items; use "
                 f"search_living_atlas to find one."
@@ -608,22 +636,24 @@ class LivingAtlasPlugin(DataPlugin):
         if item["access"] != "public":
             raise UpstreamAuthRequired(item["title"])
         if item["type"] not in _QUERYABLE_TYPES:
-            raise ValueError(
+            raise ToolInputError(
                 f"Item '{item['title']}' is a {item['type']}, which has no "
                 f"queryable records. query tools support Feature Services "
                 f"and Map Services; use get_item for metadata."
             )
         service_url = item.get("service_url", "")
         if not service_url:
-            raise ValueError(f"Item '{item['title']}' has no service URL to query.")
+            raise ToolInputError(f"Item '{item['title']}' has no service URL to query.")
         stripped = service_url.rstrip("/")
         if re.search(r"/\d+$", stripped):
             # Item URL already points at a single layer.
             if layer_id is not None:
-                stripped = stripped.rsplit("/", 1)[0] + f"/{int(layer_id)}"
+                stripped = (
+                    stripped.rsplit("/", 1)[0] + f"/{_int_arg(layer_id, 'layer_id')}"
+                )
             return stripped
         if layer_id is not None:
-            return f"{stripped}/{int(layer_id)}"
+            return f"{stripped}/{_int_arg(layer_id, 'layer_id')}"
         meta = await self._service_meta(stripped)
         candidates = (meta.get("layers") or []) + (meta.get("tables") or [])
         first_id = candidates[0].get("id") if candidates else 0
@@ -668,7 +698,7 @@ class LivingAtlasPlugin(DataPlugin):
             problems.append(
                 "(Field names are case-sensitive; call get_layer_schema to list them.)"
             )
-            raise ValueError(" ".join(problems))
+            raise ToolInputError(" ".join(problems))
 
     async def _query_layer(
         self, layer_url: str, params: Dict[str, Any]
@@ -682,14 +712,16 @@ class LivingAtlasPlugin(DataPlugin):
         if not bbox:
             return {}
         if len(bbox) != 4:
-            raise ValueError("bbox must be [xmin, ymin, xmax, ymax] in WGS84 lon/lat")
-        xmin, ymin, xmax, ymax = (float(v) for v in bbox)
+            raise ToolInputError(
+                "bbox must be [xmin, ymin, xmax, ymax] in WGS84 lon/lat"
+            )
+        xmin, ymin, xmax, ymax = (_float_arg(v, "bbox") for v in bbox)
         if not (-180 <= xmin <= 180 and -180 <= xmax <= 180):
-            raise ValueError("bbox longitudes must be between -180 and 180")
+            raise ToolInputError("bbox longitudes must be between -180 and 180")
         if not (-90 <= ymin <= 90 and -90 <= ymax <= 90):
-            raise ValueError("bbox latitudes must be between -90 and 90")
+            raise ToolInputError("bbox latitudes must be between -90 and 90")
         if xmin >= xmax or ymin >= ymax:
-            raise ValueError("bbox must be [xmin, ymin, xmax, ymax] with min < max")
+            raise ToolInputError("bbox must be [xmin, ymin, xmax, ymax] with min < max")
         return {
             "geometry": f"{xmin},{ymin},{xmax},{ymax}",
             "geometryType": "esriGeometryEnvelope",
@@ -707,7 +739,7 @@ class LivingAtlasPlugin(DataPlugin):
         record cap and validates where/out_fields/order_by."""
         filters = filters or {}
         cap = self.plugin_config.max_query_records
-        record_count = max(1, min(int(limit), cap))
+        record_count = max(1, min(_int_arg(limit, "limit"), cap))
 
         item = await self.get_dataset(item_id)
         layer_url = await self._layer_url(item, filters.get("layer_id"))
@@ -810,7 +842,7 @@ class LivingAtlasPlugin(DataPlugin):
         item = await self.get_dataset(item_id)
         layer_url = await self._layer_url(item, layer_id)
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", field or ""):
-            raise ValueError(f"Invalid field name: {field!r}")
+            raise ToolInputError(f"Invalid field name: {field!r}")
         field_names = await self._schema_field_names(layer_url)
         self._check_out_fields(field, field_names)
         where_clause = WhereValidator.validate(where)
@@ -829,7 +861,7 @@ class LivingAtlasPlugin(DataPlugin):
             "returnDistinctValues": "true",
             "returnGeometry": "false",
             "orderByFields": field,
-            "resultRecordCount": min(max(int(limit), 1), 500),
+            "resultRecordCount": min(max(_int_arg(limit, "limit"), 1), 500),
             "f": "json",
         }
         logger.info(
@@ -854,10 +886,12 @@ class LivingAtlasPlugin(DataPlugin):
         out_fields: str = "*",
         limit: int = 10,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        lon = _float_arg(lon, "lon")
+        lat = _float_arg(lat, "lat")
         if not -180 <= lon <= 180:
-            raise ValueError(f"lon must be between -180 and 180 (got {lon})")
+            raise ToolInputError(f"lon must be between -180 and 180 (got {lon})")
         if not -90 <= lat <= 90:
-            raise ValueError(f"lat must be between -90 and 90 (got {lat})")
+            raise ToolInputError(f"lat must be between -90 and 90 (got {lat})")
         item = await self.get_dataset(item_id)
         layer_url = await self._layer_url(item, layer_id)
         where_clause = WhereValidator.validate(where)
@@ -874,7 +908,7 @@ class LivingAtlasPlugin(DataPlugin):
             "outFields": safe_out_fields,
             "returnGeometry": "false",
             "outSR": 4326,
-            "resultRecordCount": min(max(int(limit), 1), 50),
+            "resultRecordCount": min(max(_int_arg(limit, "limit"), 1), 50),
             "f": "json",
         }
         logger.info(
@@ -923,7 +957,40 @@ class LivingAtlasPlugin(DataPlugin):
 
     # ── tool definitions ─────────────────────────────────────────────────
 
+    # Human-readable display names. The wire `name` is prefixed
+    # (`living_atlas__spatial_query_point`) because it must be a stable,
+    # collision-free identifier; that string reads poorly in a client's tool
+    # picker. Clients resolve display names as title -> annotations.title ->
+    # name, so these are what a user actually sees. Keyed by the UNPREFIXED
+    # tool name, matching the ToolDefinition entries below; a test fails if
+    # a tool has no entry or an entry has no tool.
+    TOOL_TITLES = {
+        "search_living_atlas": "Search Living Atlas",
+        "get_item": "Get Item Details",
+        "list_categories": "List Living Atlas Categories",
+        "get_layer_schema": "Get Layer Schema",
+        "get_distinct_values": "List Distinct Field Values",
+        "query_data": "Query Layer Data",
+        "spatial_query_point": "Query by Point",
+    }
+
+    # Every tool is a read-only query against ArcGIS Online, an open-world
+    # catalog that changes continuously, so the MCP safety hints are uniform.
+    # Deliberately NOT set: `idempotentHint`. The MCP schema documents it as
+    # "meaningful only when readOnlyHint == false", so on a read-only tool it
+    # would carry no information.
+    TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": True}
+
     def get_tools(self) -> List[ToolDefinition]:
+        tools = self._tool_definitions()
+        for tool in tools:
+            if tool.annotations is None:
+                tool.annotations = dict(self.TOOL_ANNOTATIONS)
+            if tool.title is None:
+                tool.title = self.TOOL_TITLES.get(tool.name)
+        return tools
+
+    def _tool_definitions(self) -> List[ToolDefinition]:
         item_id_prop = {
             "type": "string",
             "description": (
@@ -1247,7 +1314,24 @@ class LivingAtlasPlugin(DataPlugin):
                 success=False,
                 error_message=_premium_message(title),
             )
-        except (ValueError, UpstreamUnavailable) as e:
+        except ToolInputError as e:
+            # The caller got an argument wrong. WARNING with no traceback:
+            # a stack trace is a claim that the server broke, and spending
+            # one on "lon must be between -180 and 180" is what makes real
+            # faults in CloudWatch unreadable.
+            logger.warning(
+                f"Tool {tool_name} rejected caller input: {e}",
+                extra={"tool_name": tool_name, "error_type": "ToolInputError"},
+            )
+            return ToolResult(content=[], success=False, error_message=str(e))
+        except UpstreamUnavailable as e:
+            # A known, already-worded upstream outage/timeout -- not a bug
+            # here, so no traceback; but it is worth a WARNING so an ArcGIS
+            # Online incident is visible in the logs.
+            logger.warning(
+                f"Tool {tool_name}: upstream unavailable: {e}",
+                extra={"tool_name": tool_name, "error_type": "UpstreamUnavailable"},
+            )
             return ToolResult(content=[], success=False, error_message=str(e))
         except Exception as e:
             logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)

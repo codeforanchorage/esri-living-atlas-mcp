@@ -2,11 +2,17 @@
 
 Hardens SQL WHERE clauses, out_fields lists, and order_by expressions
 against injection before they are forwarded to an ArcGIS REST endpoint.
+
+Every rejection here is a caller mistake, so they raise ToolInputError
+(a ValueError subclass): the plugin logs those at WARNING with no
+traceback, reserving ERROR + exc_info for genuine faults.
 """
 
 import difflib
 import re
 from typing import Iterable, Optional
+
+from core.interfaces import ToolInputError
 
 
 class WhereValidator:
@@ -72,21 +78,21 @@ class WhereValidator:
             return "1=1"
 
         if len(where) > cls.MAX_LENGTH:
-            raise ValueError(
+            raise ToolInputError(
                 f"WHERE clause exceeds max length ({cls.MAX_LENGTH} chars)"
             )
 
         lowered = where.lower()
         for bad in cls.FORBIDDEN_SUBSTRINGS:
             if bad.lower() in lowered:
-                raise ValueError(
+                raise ToolInputError(
                     f"Forbidden substring {bad!r} detected in WHERE clause"
                 )
 
         where_upper = where.upper()
         for keyword in cls.FORBIDDEN_KEYWORDS:
             if re.search(rf"\b{keyword}\b", where_upper):
-                raise ValueError(
+                raise ToolInputError(
                     f"Forbidden keyword '{keyword}' detected in WHERE clause"
                 )
 
@@ -227,7 +233,7 @@ class WhereValidator:
             else:
                 parts.append(f"Field {u!r} not found in this layer.")
         parts.append("Call get_layer_schema to see all available field names.")
-        raise ValueError(" ".join(parts))
+        raise ToolInputError(" ".join(parts))
 
 
 class OutFieldsValidator:
@@ -251,10 +257,10 @@ class OutFieldsValidator:
 
         parts = [p.strip() for p in value.split(",")]
         if len(parts) > cls.MAX_FIELDS:
-            raise ValueError(f"out_fields exceeds max of {cls.MAX_FIELDS} fields")
+            raise ToolInputError(f"out_fields exceeds max of {cls.MAX_FIELDS} fields")
         for part in parts:
             if not cls._IDENT.match(part):
-                raise ValueError(f"Invalid field name in out_fields: {part!r}")
+                raise ToolInputError(f"Invalid field name in out_fields: {part!r}")
         return ",".join(parts)
 
 
@@ -280,8 +286,8 @@ class OrderByValidator:
 
         parts = [p.strip() for p in value.split(",")]
         if len(parts) > cls.MAX_FIELDS:
-            raise ValueError(f"order_by exceeds max of {cls.MAX_FIELDS} fields")
+            raise ToolInputError(f"order_by exceeds max of {cls.MAX_FIELDS} fields")
         for part in parts:
             if not cls._ENTRY.match(part):
-                raise ValueError(f"Invalid order_by entry: {part!r}")
+                raise ToolInputError(f"Invalid order_by entry: {part!r}")
         return ",".join(parts)

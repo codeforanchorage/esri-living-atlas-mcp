@@ -53,9 +53,12 @@ python3 scripts/local_server.py
 
 **What it does:**
 - Starts a local HTTP server on `http://localhost:8000/mcp`
-- Supports Streamable HTTP transport with session management
-- Provides detailed logging for debugging
-- Uses the same MCP server logic as Lambda deployment
+- Routes every request through `UniversalHTTPHandler`, exactly as the Lambda
+  adapter does -- the Origin allowlist (403), the `MCP-Protocol-Version` check
+  (400/-32022), session IDs and CORS all behave as in prod
+- Provides detailed logging for debugging (plus the tool name + arguments of
+  every `tools/call`)
+- `OPENCONTEXT_LOCAL_PORT=8765` picks another port when 8000 is taken
 
 **Requirements:**
 - Python 3.11+
