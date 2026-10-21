@@ -3,7 +3,10 @@ stage_name  = "staging"
 aws_region  = "us-west-2"
 config_file = "config.yaml"
 lambda_memory  = 512
-lambda_timeout = 120
+# Overridden by aws.lambda_timeout in config.yaml (main.tf reads config
+# first); kept equal to it so the two cannot drift. 28s sits under API
+# Gateway's hard 29s integration timeout -- see config.yaml.
+lambda_timeout = 28
 
 # Staging gets tighter quotas than prod: it exists for smoke tests, not
 # traffic. No custom domain -- use the raw API Gateway invoke URL.

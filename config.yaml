@@ -34,10 +34,13 @@ plugins:
     portal_url: "https://www.arcgis.com"
     group_id: "47dd57c9a59d458c86d3d6b978560088"
     category_set_item_id: "1ad6b64fe4e1428a8f182dd6010fc2c9"
-    # 25s, not 120: API Gateway hard-caps responses at 29s, so an upstream
-    # timeout must fire BEFORE that to reach the client as a clean JSON-RPC
-    # error instead of an opaque 504. Normal AGO queries finish in <5s.
-    timeout: 25
+    # Timeout ladder: plugin HTTP (20s) < Lambda (28s) < API Gateway (29s,
+    # hard). An upstream that hangs must fail HERE first, so the caller gets
+    # a readable "upstream unavailable" tool error; if the Lambda died first
+    # the gateway would return an opaque 502/504. Normal AGO queries finish
+    # in <5s, so 20s is far above anything legitimate. Enforced by
+    # tests/test_config_validation.py::TestTimeoutLadder.
+    timeout: 20
     search_cache_ttl: 600 # ~10 min: the catalog updates continuously
     metadata_cache_ttl: 3600 # ~1 h: item metadata / schemas / taxonomy
     max_query_records: 500 # server-side cap; many LA layers are global
@@ -48,14 +51,21 @@ plugins:
     portal_url: "https://geo.sandag.org/portal"
     services_url: "https://geo.sandag.org/server/rest/services"
     city_name: "the San Diego region"
-    timeout: 25
+    timeout: 20
 
 # AWS deployment settings
 aws:
   region: "us-west-2" # AWS region for Lambda
   lambda_name: "living-atlas-mcp" # Lambda function name
   lambda_memory: 512 # Lambda memory in MB (128-10240)
-  lambda_timeout: 120 # Lambda timeout in seconds (max 900)
+  # 28, not 120: REST API Gateway's integration timeout is a hard 29s, so a
+  # Lambda allowed to run longer keeps executing -- and keeps holding one of
+  # the reserved-concurrency slots -- after the gateway has already answered
+  # 504. Capping it under the ceiling lets the Lambda self-terminate and
+  # attribute the timeout in its own metrics. This value takes precedence
+  # over `lambda_timeout` in terraform/aws/*.tfvars (main.tf reads config
+  # first); the tfvars are kept equal so the two cannot drift.
+  lambda_timeout: 28
 
 # Logging configuration
 logging:
