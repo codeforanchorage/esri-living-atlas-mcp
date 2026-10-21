@@ -38,7 +38,10 @@ class TestInitialize:
         assert response["result"]["protocolVersion"] == "2025-03-26"
         assert "capabilities" in response["result"]
         assert "serverInfo" in response["result"]
-        assert response["result"]["serverInfo"]["name"] == "opencontext"
+        # serverInfo comes from config; with none configured, the framework
+        # default applies (see tests/test_mcp_conformance.py for the
+        # configured case).
+        assert response["result"]["serverInfo"]["name"] == "OpenContext"
         assert response["result"]["serverInfo"]["version"] == "1.0.0"
 
     @pytest.mark.asyncio
@@ -278,8 +281,11 @@ class TestToolsCall:
 
         assert response is not None
         assert "error" in response
-        assert response["error"]["code"] == -32603
-        assert "Tool name is required" in response["error"]["data"]
+        # A tools/call with no `name` never described a valid call, so
+        # it is Invalid params -- not a server fault.
+        assert response["error"]["code"] == -32602
+        assert response["error"]["message"] == "Invalid params"
+        assert "name" in response["error"]["data"]
 
     @pytest.mark.asyncio
     async def test_tools_call_handles_missing_arguments(self):
@@ -334,7 +340,8 @@ class TestPing:
         assert response is not None
         assert response["jsonrpc"] == "2.0"
         assert response["id"] == 1
-        assert response["result"]["status"] == "ok"
+        # The spec defines the ping result as an empty object.
+        assert response["result"] == {}
 
 
 class TestNotifications:
@@ -395,7 +402,9 @@ class TestUnknownMethods:
 
         assert response is not None
         assert "error" in response
-        assert response["error"]["code"] == -32603
+        # An unknown method is a caller error, not a server fault.
+        assert response["error"]["code"] == -32601
+        assert response["error"]["message"] == "Method not found"
         assert "Unknown method" in response["error"]["data"]
 
 

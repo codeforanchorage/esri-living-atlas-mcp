@@ -1,6 +1,6 @@
 [project]
 name = "opencontext"
-version = "1.0.0"
+version = "1.1.0"
 description = "Extensible MCP framework template for civic data platforms"
 authors = [
     {name = "Srihari Raman", email = "srihari.raman@boston.gov"}
@@ -24,7 +24,9 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "pytest-xdist>=3.0.0",
-    "ruff>=0.1.0",
+    # Pinned to match .pre-commit-config.yaml and CI: ruff's formatter is not
+    # stable across releases, so an unpinned install disagrees with the hook.
+    "ruff==0.15.11",
     "pip-audit>=2.0.0",
 ]
 
