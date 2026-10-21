@@ -7,6 +7,7 @@ the "one fork = one MCP server" rule and catches all invalid configurations.
 import pytest
 import tempfile
 import os
+import re
 import yaml
 
 from core.validators import (
@@ -378,3 +379,53 @@ class TestGetLoggingConfig:
 
         assert logging_config["level"] == "INFO"
         assert logging_config["format"] == "json"
+
+
+class TestTimeoutLadder:
+    """The three timeouts must nest: plugin HTTP < Lambda < API Gateway.
+
+    REST API Gateway's integration timeout is a hard, non-adjustable 29s.
+    A Lambda allowed to outlive it keeps running (and holding a reserved
+    concurrency slot) after the client already got a 504; a plugin HTTP
+    timeout longer than the Lambda's means a hung upstream kills the
+    Lambda mid-flight instead of surfacing as a readable tool error. This
+    pins the tracked config.yaml and both tfvars files, not a fixture, so
+    an edit to any of them that breaks the ladder fails CI.
+    """
+
+    API_GATEWAY_CEILING = 29
+    REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def _config(self):
+        return load_and_validate_config(os.path.join(self.REPO_ROOT, "config.yaml"))
+
+    def test_plugin_timeout_sits_under_lambda_under_gateway(self):
+        config = self._config()
+        _name, plugin = get_enabled_plugin_config(config)
+        lambda_timeout = config["aws"]["lambda_timeout"]
+        plugin_timeout = plugin["timeout"]
+
+        assert lambda_timeout < self.API_GATEWAY_CEILING, (
+            f"aws.lambda_timeout {lambda_timeout}s is not under API Gateway's "
+            f"hard {self.API_GATEWAY_CEILING}s integration timeout"
+        )
+        assert plugin_timeout < lambda_timeout, (
+            f"plugin timeout {plugin_timeout}s must sit under "
+            f"aws.lambda_timeout {lambda_timeout}s"
+        )
+
+    def test_tfvars_agree_with_config(self):
+        """main.tf reads aws.lambda_timeout from config.yaml FIRST, so the
+        tfvars value is dead unless that key is removed -- keep them equal
+        so a rollback of either file cannot silently reopen the gap."""
+        config_timeout = self._config()["aws"]["lambda_timeout"]
+        for env in ("prod", "staging"):
+            path = os.path.join(self.REPO_ROOT, "terraform", "aws", f"{env}.tfvars")
+            with open(path) as f:
+                tfvars = f.read()
+            match = re.search(r"^lambda_timeout\s*=\s*(\d+)", tfvars, re.MULTILINE)
+            assert match, f"{env}.tfvars has no lambda_timeout"
+            assert int(match.group(1)) == config_timeout, (
+                f"{env}.tfvars lambda_timeout {match.group(1)} != "
+                f"config.yaml {config_timeout}"
+            )
