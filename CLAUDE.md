@@ -39,12 +39,12 @@ python3 -c "from core.validators import load_and_validate_config; load_and_valid
 uv run pytest tests/ -n auto                                    # All tests, parallel
 uv run pytest tests/test_ckan_plugin.py -v                      # Single file
 uv run pytest tests/test_ckan_plugin.py::TestClass::test_name -v  # Single test
-uv run pytest tests/ --cov=core --cov=plugins --cov-report=term-missing  # With coverage (reported, not enforced)
+uv run pytest tests/ --cov=plugins --cov-report=term-missing  # With coverage (reported, not enforced)
 
 # Linting (ruff)
-uv run ruff check core/ plugins/ server/ tests/ scripts/  # Check (CI runs exactly this)
-uv run ruff check core/ plugins/ server/ tests/ --fix      # Auto-fix
-uv run ruff format --check core/ plugins/ server/ tests/   # CI gate; the tree is clean
+uv run ruff check plugins/ tests/ scripts/  # Check (CI runs exactly this)
+uv run ruff check plugins/ tests/ --fix      # Auto-fix
+uv run ruff format --check plugins/ tests/   # CI gate; the tree is clean
 # ruff is pinned to 0.15.11 (pyproject, pre-commit, CI). scripts/ is
 # hand-wrapped and lint-only: never run a wholesale `ruff format` on it.
 
@@ -61,6 +61,8 @@ cd client && make build
 ## Architecture
 
 **Core rule: One Fork = One MCP Server.** Each deployment runs exactly ONE plugin. This is enforced at config validation time (`core/validators.py`) and at runtime (`PluginManager.load_plugins()`). To deploy multiple MCP servers, fork the repo per plugin.
+
+**The MCP server core is a dependency, not code in this repo.** `core/` and `server/` come from the [`opencontext-core`](https://github.com/codeforanchorage/opencontext-core) package, pinned to a tag in `requirements.txt` and `pyproject.toml` (keep the two in step; `tests/test_core_dependency.py` checks). To change protocol or transport behaviour, change it there, tag a release, and move the pin here. Do not re-create `core/` or `server/` in this repo: a local copy shadows the package. `scripts/deploy.sh` installs the package next to `plugins/` in the Lambda zip, so the handler string is unchanged. To work on both at once: `pip install -e ../opencontext-core`. Run commands from the repo root, which is where the installed core looks for `plugins/`.
 
 **Request flow:**
 ```

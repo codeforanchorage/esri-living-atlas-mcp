@@ -36,13 +36,13 @@ jobs:
           pip install ruff==0.15.11
 
       - name: Ruff lint
-        run: ruff check core/ plugins/ server/ tests/ scripts/
+        run: ruff check plugins/ tests/ scripts/
 
       # No exclusions: the tree was format-cleaned in its own style commit
       # before this gate was added, and an exclusion list is a permanent
       # hole rather than a to-do. scripts/ is hand-wrapped and lint-only.
       - name: Ruff format
-        run: ruff format --check core/ plugins/ server/ tests/
+        run: ruff format --check plugins/ tests/
 
       # config.yaml is TRACKED in this fork (it is the source of truth the
       # deploy packages), so CI validates the file that actually ships.
@@ -69,7 +69,7 @@ jobs:
       - name: Pytest
         run: |
           pytest tests/ -q -n auto \
-            --cov=core --cov=plugins --cov=server \
+            --cov=plugins \
             --cov-report=term-missing
 
   audit:
