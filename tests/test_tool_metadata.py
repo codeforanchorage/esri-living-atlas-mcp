@@ -19,13 +19,13 @@ from tests.test_living_atlas_plugin import make_plugin
 
 async def _manager_with(tool_defs):
     manager = PluginManager(
-        {"plugins": {"ckan": {"enabled": True, "base_url": "https://x.example"}}}
+        {"plugins": {"living_atlas": {"enabled": True}}}
     )
     with patch("core.plugin_manager.PluginManager._load_plugin_class") as mock_load:
         mock_instance = Mock()
         mock_instance.initialize = AsyncMock(return_value=True)
         mock_instance.get_tools = Mock(return_value=tool_defs)
-        mock_instance.plugin_name = "ckan"
+        mock_instance.plugin_name = "living_atlas"
         mock_instance.plugin_type = PluginType.OPEN_DATA
         mock_instance.plugin_version = "1.0.0"
         mock_load.return_value = MagicMock(return_value=mock_instance)
@@ -48,7 +48,7 @@ class TestPluginManagerEmission:
             ]
         )
         (tool,) = manager.get_all_tools()
-        assert tool["name"] == "ckan__search"
+        assert tool["name"] == "living_atlas__search"
         assert tool["title"] == "Search Datasets"
         assert tool["annotations"] == {"readOnlyHint": True}
         assert "outputSchema" not in tool

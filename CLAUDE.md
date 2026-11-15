@@ -37,8 +37,8 @@ python3 -c "from core.validators import load_and_validate_config; load_and_valid
 
 # Tests
 uv run pytest tests/ -n auto                                    # All tests, parallel
-uv run pytest tests/test_ckan_plugin.py -v                      # Single file
-uv run pytest tests/test_ckan_plugin.py::TestClass::test_name -v  # Single test
+uv run pytest tests/test_arcgis_plugin.py -v                      # Single file
+uv run pytest tests/test_arcgis_plugin.py::TestClass::test_name -v  # Single test
 uv run pytest tests/ --cov=plugins --cov-report=term-missing  # With coverage (reported, not enforced)
 
 # Linting (ruff)
@@ -81,7 +81,7 @@ Claude (stdio) → Go client (client/) or stdio_bridge.py → HTTP POST /mcp
 - `server/http_handler.py` — Cloud-agnostic HTTP handler shared by Lambda and local server. Enforces the Origin allowlist (403), validates `MCP-Protocol-Version` (400/-32022, `initialize` exempt), mints the per-session id, and adds CORS.
 - `stdio_bridge.py` — Python stdio-to-HTTP bridge for connecting Claude Desktop/Code to the local server (alternative to Go client)
 
-**Built-in plugins** (`plugins/`): `ckan`, `arcgis`, `socrata`, `living_atlas` — each implements `DataPlugin` with `search_datasets`, `get_dataset`, `query_data`. This fork enables `living_atlas` (which reuses `plugins/arcgis/where_validator.py` for WHERE/out_fields/order_by hardening). Custom plugins go in `custom_plugins/` and are auto-discovered.
+**Plugins** (`plugins/`): `arcgis`, `living_atlas`. This fork keeps only what it runs or imports; the generic `ckan`, `arcgis` and `socrata` plugins of upstream OpenContext that it did not use were deleted (they remain in [CityOfBoston/OpenContext](https://github.com/CityOfBoston/OpenContext)). A plugin implements `MCPPlugin` (or `DataPlugin` with `search_datasets`, `get_dataset`, `query_data`). Custom plugins go in `custom_plugins/` and are auto-discovered.
 
 ## Plugin Development
 
