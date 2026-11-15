@@ -18,9 +18,7 @@ from tests.test_living_atlas_plugin import make_plugin
 
 
 async def _manager_with(tool_defs):
-    manager = PluginManager(
-        {"plugins": {"living_atlas": {"enabled": True}}}
-    )
+    manager = PluginManager({"plugins": {"living_atlas": {"enabled": True}}})
     with patch("core.plugin_manager.PluginManager._load_plugin_class") as mock_load:
         mock_instance = Mock()
         mock_instance.initialize = AsyncMock(return_value=True)
